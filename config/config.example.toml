@@ -1,0 +1,14 @@
+[server]
+bind_addr = "127.0.0.1:8080"
+mode = "standalone"
+
+[auth]
+# Modes: "local_jwt" or "jwks"
+mode = "jwks"
+issuer = "https://auth.amoeba.example.com"
+jwks_url = "https://auth.amoeba.example.com/.well-known/jwks.json"
+audience = "amoeba-compute"
+
+# Required only if mode = "local_jwt"
+jwt_secret = "env:AMOEBA_LOCAL_JWT_SECRET"
+users_file = "/etc/amoeba/users.json"

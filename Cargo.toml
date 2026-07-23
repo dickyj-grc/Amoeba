@@ -1,0 +1,14 @@
+[package]
+name = "amoeba"
+version = "0.1.0"
+edition = "2021"
+description = "Edge-aware, scale-to-zero L7 application and compute gateway"
+license = "MIT"
+repository = "https://github.com/hyperjump888/Amoeba"
+readme = "README.md"
+
+[[bin]]
+name = "amoeba"
+path = "src/main.rs"
+
+[dependencies]
