@@ -1,5 +1,7 @@
-//! Axum middleware that verifies the bearer token and attaches `Claims`.
+//! Axum middleware that verifies the bearer token and attaches `Claims`,
+//! plus a follow-on gate restricting routes to callers with the "admin" role.
 
+use super::Claims;
 use crate::state::AppState;
 use axum::{
     extract::{Request, State},
@@ -38,6 +40,25 @@ pub async fn unified_auth_middleware(
     }
 }
 
+fn is_admin(roles: &[String]) -> bool {
+    roles.iter().any(|r| r == "admin")
+}
+
+/// Route-scoped gate for admin-only endpoints (e.g. `/admin/*`). Must run
+/// after `unified_auth_middleware` so `Claims` are already attached to the request.
+pub async fn require_admin_role(req: Request, next: Next) -> Result<Response, StatusCode> {
+    let claims = req
+        .extensions()
+        .get::<Claims>()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if is_admin(&claims.roles) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +76,20 @@ mod tests {
     #[test]
     fn rejects_bare_bearer_with_no_token() {
         assert_eq!(extract_bearer_token("Bearer "), Some(""));
+    }
+
+    #[test]
+    fn is_admin_true_when_admin_role_present() {
+        assert!(is_admin(&["viewer".to_string(), "admin".to_string()]));
+    }
+
+    #[test]
+    fn is_admin_false_without_admin_role() {
+        assert!(!is_admin(&["viewer".to_string(), "analyst".to_string()]));
+    }
+
+    #[test]
+    fn is_admin_false_for_empty_roles() {
+        assert!(!is_admin(&[]));
     }
 }

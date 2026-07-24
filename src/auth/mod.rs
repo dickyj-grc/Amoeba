@@ -3,6 +3,7 @@
 pub mod jwks;
 pub mod jwt;
 pub mod middleware;
+pub mod users;
 
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};

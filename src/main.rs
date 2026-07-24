@@ -1,16 +1,13 @@
-mod auth;
-mod capacity;
-mod config;
-mod lifecycle;
-mod metering;
-mod routing;
-mod state;
-
-use auth::jwt::local_engine;
-use auth::middleware::unified_auth_middleware;
-use axum::{middleware, routing::any, Router};
-use routing::proxy::proxy_handler;
-use state::AppState;
+use amoeba::auth::jwt::local_engine;
+use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
+use amoeba::routing::admin::{create_user, delete_user, update_user};
+use amoeba::routing::proxy::proxy_handler;
+use amoeba::state::AppState;
+use axum::{
+    middleware,
+    routing::{any, post},
+    Router,
+};
 use std::sync::Arc;
 use tracing::info;
 
@@ -28,11 +25,23 @@ async fn main() {
     ));
 
     // Initialize App State & Dynamic File Watchers
-    let app_state = AppState::new("/etc/amoeba/services.json", jwt_engine);
+    let app_state = AppState::new(
+        "/etc/amoeba/services.json",
+        "/etc/amoeba/users.json",
+        jwt_engine,
+    );
+
+    // Admin-only user management routes: require both a valid JWT (outer layer,
+    // applied below) and the "admin" role (route_layer, scoped to just these routes).
+    let admin_routes = Router::new()
+        .route("/users", post(create_user))
+        .route("/users/:username", axum::routing::patch(update_user).delete(delete_user))
+        .route_layer(middleware::from_fn(require_admin_role));
 
     // Build Router Pipeline
     let app = Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))
+        .nest("/admin", admin_routes)
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             unified_auth_middleware,
