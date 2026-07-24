@@ -1,0 +1,50 @@
+services:
+  # 1. Edge Reverse Proxy (Caddy)
+  caddy:
+    image: caddy:2-alpine
+    container_name: amoeba-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - amoeba-net
+
+  # 2. Amoeba Compute Orchestrator (Rust binary)
+  orchestrator:
+    build: .
+    # Swap the `build: .` line above for `image: amoeba/amoeba:latest` once you publish an image.
+    container_name: amoeba-orchestrator
+    restart: unless-stopped
+    environment:
+      - AMOEBA_LOCAL_JWT_SECRET=${AMOEBA_LOCAL_JWT_SECRET:?set AMOEBA_LOCAL_JWT_SECRET in your .env file}
+      - RUST_LOG=info
+    volumes:
+      # Mount configuration files (relative to this file, wherever the repo is cloned)
+      - ./config:/etc/amoeba:rw
+      # Mount host Docker socket so the orchestrator can start/stop worker containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - amoeba-net
+
+  # 3. Example scale-to-zero worker, joined to the same network so it's reachable
+  #    from services.json by container name (see config/services.docker.example.json).
+  #    Remove this service and define your own workers the same way.
+  # gemma4:
+  #   image: ollama/ollama:latest
+  #   container_name: amoeba-gemma4-worker
+  #   restart: unless-stopped
+  #   networks:
+  #     - amoeba-net
+
+networks:
+  amoeba-net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

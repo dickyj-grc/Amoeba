@@ -20,6 +20,9 @@ pub struct OperationRule {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServiceConfig {
     pub image: String,
+    /// Upstream host: a literal IP, or a Docker container/service name resolvable
+    /// via Docker DNS when this service and the orchestrator share a network
+    /// (see config/services.docker.example.json).
     pub ip: String,
     pub port: u16,
     pub cooldown_seconds: Option<u64>,

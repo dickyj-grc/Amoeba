@@ -1,0 +1,11 @@
+# Replace with your actual domain name
+compute.yourdomain.com {
+    # Optional: raise the max request body size (e.g. for large PDF uploads to Docling)
+    request_body {
+        max_size 50MB
+    }
+
+    # Reverse proxy all requests to the orchestrator container over the shared
+    # amoeba-net Docker network (Caddy resolves "orchestrator" via Docker DNS).
+    reverse_proxy orchestrator:8080
+}

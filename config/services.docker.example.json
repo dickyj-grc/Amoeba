@@ -1,0 +1,26 @@
+{
+  "services": {
+    "gemma4": {
+      "image": "ollama/ollama:latest",
+      "ip": "amoeba-gemma4-worker",
+      "port": 11434,
+      "cooldown_seconds": 180,
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    },
+    "docling": {
+      "image": "ds4sd/docling-serve:latest",
+      "ip": "amoeba-docling-worker",
+      "port": 5000,
+      "cooldown_seconds": 120,
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    }
+  }
+}

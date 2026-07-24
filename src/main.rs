@@ -9,7 +9,7 @@ use axum::{
     Router,
 };
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -20,9 +20,11 @@ async fn main() {
         .init();
 
     // Configure Authentication Mode
-    let jwt_engine = Arc::new(local_engine(
-        "super_secret_local_key_change_in_production",
-    ));
+    let jwt_secret = std::env::var("AMOEBA_LOCAL_JWT_SECRET").unwrap_or_else(|_| {
+        warn!("AMOEBA_LOCAL_JWT_SECRET not set; using an insecure default (do not use this in production)");
+        "super_secret_local_key_change_in_production".to_string()
+    });
+    let jwt_engine = Arc::new(local_engine(jwt_secret));
 
     // Initialize App State & Dynamic File Watchers
     let app_state = AppState::new(
