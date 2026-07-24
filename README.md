@@ -1,9 +1,14 @@
-<img src="images/amoeba%20square%20logo.png" alt="Amoeba logo" width="120" align="left" />
+<table border="0">
+<tr>
+<td width="90"><img src="images/amoeba%20square%20logo.png" alt="Amoeba logo" width="72" /></td>
+<td>
 
 # Amoeba
 The Amoeba Compute Orchestrator is an edge-aware, scale-to-zero L7 application and compute gateway written in Rust (Axum). It manages the lifecycle of transient microservices (AI models, web scrapers, document parsers) and stateful application nodes, enforcing zero-trust authorization, usage metering, and capacity gating.
 
-<br clear="left"/>
+</td>
+</tr>
+</table>
 
 
 ## System Architecture & Technical Specification
