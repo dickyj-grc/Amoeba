@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Edge-aware, scale-to-zero L7 application and compute gateway"
 license = "MIT"
-repository = "https://github.com/hyperjump888/Amoeba"
+repository = "https://github.com/dickyj-grc/Amoeba"
 readme = "README.md"
 
 [[bin]]

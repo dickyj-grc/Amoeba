@@ -345,7 +345,7 @@ Amoeba/
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/hyperjump888/Amoeba.git && cd Amoeba
+git clone https://github.com/dickyj-grc/Amoeba.git && cd Amoeba
 
 # 2. Set your own JWT signing secret
 cp .env.example .env
