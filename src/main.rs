@@ -33,21 +33,25 @@ async fn main() {
         jwt_engine,
     );
 
-    // Admin-only user management routes: require both a valid JWT (outer layer,
-    // applied below) and the "admin" role (route_layer, scoped to just these routes).
+    // Admin-only user management routes: require both a valid JWT and the "admin"
+    // role. route_layer calls stack innermost-first, so unified_auth_middleware
+    // (added last) runs before require_admin_role, matching the order Claims must
+    // be attached before the role check can read them.
     let admin_routes = Router::new()
         .route("/users", post(create_user))
         .route("/users/:username", axum::routing::patch(update_user).delete(delete_user))
-        .route_layer(middleware::from_fn(require_admin_role));
+        .route_layer(middleware::from_fn(require_admin_role))
+        .route_layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            unified_auth_middleware,
+        ));
 
-    // Build Router Pipeline
+    // Proxy routes handle their own auth inside proxy_handler, since whether a
+    // token is required at all depends on the target service's "public" flag,
+    // which isn't known until the service catalog has been consulted.
     let app = Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))
         .nest("/admin", admin_routes)
-        .layer(middleware::from_fn_with_state(
-            app_state.clone(),
-            unified_auth_middleware,
-        ))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();

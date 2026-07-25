@@ -119,6 +119,8 @@ Services are defined declaratively in `/etc/amoeba/services.json`. The orchestra
 
 ```
 
+**`public` (optional, defaults to `false`)** — set `"public": true` on a service to skip JWT verification and the permission check entirely for it. This is an explicit opt-in: a service with `permissions` omitted or empty is *not* public by default — it still requires a valid token, it just denies every role (fails closed with `403`) until you add roles to `permissions`. Only use `public: true` for endpoints that are genuinely meant to be reachable with no auth at all (e.g. a health check or webhook receiver).
+
 ### 2.2 Subpath Mapping Protocol
 
 Routing does not require unique DNS subdomains. Any service is reachable via path parameters:

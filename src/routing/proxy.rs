@@ -1,6 +1,7 @@
 //! Extracts service_name/subpath from the incoming path and dispatches upstream.
 
 use super::operation::{classify_operation, has_permission};
+use crate::auth::middleware::verify_request_token;
 use crate::auth::Claims;
 use crate::config::schema::ServiceConfig;
 use crate::lifecycle::container::ServiceRuntimeState;
@@ -68,31 +69,33 @@ pub async fn proxy_handler(
         .get(&service_name)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // 2. Extract Claims from Auth Middleware (cloned to release the `req` borrow early)
-    let claims = req
-        .extensions()
-        .get::<Claims>()
-        .cloned()
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    // 2. Authenticate, unless this service opted out via "public": true
+    let claims: Option<Claims> = if service_cfg.public {
+        None
+    } else {
+        Some(verify_request_token(&state.jwt_engine, req.headers()).await?)
+    };
 
     // 3. Classify Operation (HTTP Method -> Operation Name)
     let operation = classify_operation(req.method().as_str());
 
-    // 4. ACL Check: Evaluate Roles against Permissions Matrix
-    let allowed_roles = service_cfg
-        .permissions
-        .get(operation)
-        .cloned()
-        .unwrap_or_default();
+    // 4. ACL Check: Evaluate Roles against Permissions Matrix (skipped for public services)
+    if let Some(claims) = &claims {
+        let allowed_roles = service_cfg
+            .permissions
+            .get(operation)
+            .cloned()
+            .unwrap_or_default();
 
-    if !has_permission(&claims, &allowed_roles) {
-        info!(
-            user = %claims.sub,
-            service = %service_name,
-            operation = %operation,
-            "⛔ Access denied (403 Forbidden)"
-        );
-        return Err(StatusCode::FORBIDDEN);
+        if !has_permission(claims, &allowed_roles) {
+            info!(
+                user = %claims.sub,
+                service = %service_name,
+                operation = %operation,
+                "⛔ Access denied (403 Forbidden)"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     // 5. Track Runtime Activity & Connection Counter
@@ -134,8 +137,8 @@ pub async fn proxy_handler(
 
             // 9. Emit Usage Telemetry Log
             emit_usage_telemetry(
-                &claims.sub,
-                claims.org_id.as_deref(),
+                claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("anonymous"),
+                claims.as_ref().and_then(|c| c.org_id.as_deref()),
                 &service_name,
                 operation,
                 status.as_u16(),
@@ -166,6 +169,7 @@ mod tests {
             operation_rules: None,
             permissions: HashMap::new(),
             upstream_auth,
+            public: false,
         }
     }
 

@@ -27,8 +27,15 @@ pub struct ServiceConfig {
     pub port: u16,
     pub cooldown_seconds: Option<u64>,
     pub operation_rules: Option<Vec<OperationRule>>,
+    /// operation -> roles allowed to perform it. Missing/empty means no role is
+    /// granted access (fails closed) unless `public` is set.
+    #[serde(default)]
     pub permissions: HashMap<String, Vec<String>>,
     pub upstream_auth: Option<UpstreamAuth>,
+    /// Skips JWT verification and the permission check entirely for this service
+    /// when true. Defaults to false: auth is required unless explicitly opted out.
+    #[serde(default)]
+    pub public: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -69,5 +76,41 @@ mod tests {
     fn rejects_catalog_missing_required_fields() {
         let json = r#"{"services": {"broken": {"image": "x"}}}"#;
         assert!(serde_json::from_str::<ServiceCatalog>(json).is_err());
+    }
+
+    #[test]
+    fn public_defaults_to_false_when_omitted() {
+        let json = r#"{
+            "services": {
+                "svc": {
+                    "image": "x",
+                    "ip": "127.0.0.1",
+                    "port": 8080
+                }
+            }
+        }"#;
+
+        let catalog: ServiceCatalog = serde_json::from_str(json).unwrap();
+        let svc = catalog.services.get("svc").unwrap();
+        assert!(!svc.public);
+        assert!(svc.permissions.is_empty());
+    }
+
+    #[test]
+    fn public_can_be_explicitly_set_without_permissions() {
+        let json = r#"{
+            "services": {
+                "svc": {
+                    "image": "x",
+                    "ip": "127.0.0.1",
+                    "port": 8080,
+                    "public": true
+                }
+            }
+        }"#;
+
+        let catalog: ServiceCatalog = serde_json::from_str(json).unwrap();
+        let svc = catalog.services.get("svc").unwrap();
+        assert!(svc.public);
     }
 }

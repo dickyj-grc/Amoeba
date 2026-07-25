@@ -8,6 +8,10 @@ use crate::lifecycle::reaper::spawn_reaper_thread;
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
     pub catalog: ArcSwap<ServiceCatalog>,
@@ -29,11 +33,20 @@ impl AppState {
             .map(|key| (key.clone(), Arc::new(ServiceRuntimeState::new())))
             .collect();
 
+        // A bare `reqwest::Client::new()` has no timeout at all, so a backend that
+        // never responds (or a connection that's silently dropped rather than
+        // actively refused) would hang the proxied request forever.
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+            .timeout(UPSTREAM_REQUEST_TIMEOUT)
+            .build()
+            .expect("failed to build upstream HTTP client");
+
         let state = Arc::new(Self {
             catalog: ArcSwap::from_pointee(initial_catalog),
             runtime_states: ArcSwap::from_pointee(initial_runtimes),
             jwt_engine,
-            http_client: reqwest::Client::new(),
+            http_client,
             users_file: users_file.to_string(),
         });
 

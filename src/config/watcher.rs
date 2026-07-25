@@ -18,11 +18,17 @@ pub fn load_catalog(path: &str) -> Result<ServiceCatalog, Box<dyn std::error::Er
 
 /// Watches `path` for modifications and invokes `on_reload` with the freshly
 /// parsed catalog each time the file changes.
+///
+/// Runs on tokio's blocking thread pool (`spawn_blocking`), not a regular async
+/// task: the watch loop below blocks synchronously on a `std::sync::mpsc`
+/// receiver with no `.await` points, so spawning it via plain `tokio::spawn`
+/// would permanently occupy an async worker thread and starve every other task
+/// scheduled on it once the watched path actually exists.
 pub fn spawn_file_watcher<F>(path: String, mut on_reload: F)
 where
     F: FnMut(ServiceCatalog) + Send + 'static,
 {
-    tokio::spawn(async move {
+    tokio::task::spawn_blocking(move || {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = match notify::recommended_watcher(tx) {
             Ok(w) => w,

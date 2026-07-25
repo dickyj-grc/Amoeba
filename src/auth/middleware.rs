@@ -1,11 +1,11 @@
 //! Axum middleware that verifies the bearer token and attaches `Claims`,
 //! plus a follow-on gate restricting routes to callers with the "admin" role.
 
-use super::Claims;
+use super::{Claims, JwtEngine};
 use crate::state::AppState;
 use axum::{
     extract::{Request, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -15,29 +15,35 @@ fn extract_bearer_token(header_value: &str) -> Option<&str> {
     header_value.strip_prefix("Bearer ")
 }
 
-pub async fn unified_auth_middleware(
-    State(state): State<Arc<AppState>>,
-    mut req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let auth_header = req
-        .headers()
+/// Verifies the bearer token on a request's headers against `jwt_engine`.
+/// Shared by the global `unified_auth_middleware` and by handlers (like
+/// `proxy_handler`) that need to decide *whether* to require a token before
+/// running this check, e.g. for services marked `public` in `services.json`.
+pub async fn verify_request_token(
+    jwt_engine: &JwtEngine,
+    headers: &HeaderMap,
+) -> Result<Claims, StatusCode> {
+    let auth_header = headers
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let token = extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    match state.jwt_engine.verify_token(token).await {
-        Ok(claims) => {
-            req.extensions_mut().insert(claims);
-            Ok(next.run(req).await)
-        }
-        Err(err) => {
-            tracing::error!("Auth failure: {}", err);
-            Err(StatusCode::UNAUTHORIZED)
-        }
-    }
+    jwt_engine.verify_token(token).await.map_err(|err| {
+        tracing::error!("Auth failure: {}", err);
+        StatusCode::UNAUTHORIZED
+    })
+}
+
+pub async fn unified_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let claims = verify_request_token(&state.jwt_engine, req.headers()).await?;
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
 }
 
 fn is_admin(roles: &[String]) -> bool {
@@ -91,5 +97,22 @@ mod tests {
     #[test]
     fn is_admin_false_for_empty_roles() {
         assert!(!is_admin(&[]));
+    }
+
+    #[tokio::test]
+    async fn verify_request_token_rejects_missing_authorization_header() {
+        let engine = crate::auth::jwt::local_engine("test-secret");
+        let result = verify_request_token(&engine, &HeaderMap::new()).await;
+        assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn verify_request_token_rejects_non_bearer_scheme() {
+        let engine = crate::auth::jwt::local_engine("test-secret");
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Basic dXNlcjpwYXNz".parse().unwrap());
+
+        let result = verify_request_token(&engine, &headers).await;
+        assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
     }
 }
