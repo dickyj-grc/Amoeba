@@ -238,22 +238,35 @@ pub async fn proxy_handler(
 
         let driver = state.drivers.load().get(&service_name).cloned();
         if let Some(driver) = driver {
-            if let Err(e) = driver.ensure_started().await {
-                runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
-                error!(service = %service_name, "failed to start service: {e}");
-                return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, "driver-start-failed"));
+            match driver.ensure_started().await {
+                // Only apple-container reports a host here (a fresh IP on every
+                // start, no stable DNS name) -- cache it for this and future
+                // (warm) requests. Docker/Compose return `None`: their static
+                // `placement.ip`/`primary_service` is already correct.
+                Ok(Some(host)) => runtime.set_resolved_host(host),
+                Ok(None) => {}
+                Err(e) => {
+                    runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
+                    error!(service = %service_name, "failed to start service: {e}");
+                    return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, "driver-start-failed"));
+                }
             }
         }
 
-        if !wait_until_ready(service_cfg.upstream_host(), service_cfg.placement.port).await {
+        let host = runtime.resolved_host().unwrap_or_else(|| service_cfg.upstream_host().to_string());
+        if !wait_until_ready(&host, service_cfg.placement.port).await {
             runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
             error!(service = %service_name, "service did not become ready in time");
             return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, "driver-not-ready"));
         }
     }
 
-    // 6. Build Upstream Request URL
-    let target_url = build_target_url(service_cfg.upstream_host(), service_cfg.placement.port, &subpath);
+    // 6. Build Upstream Request URL. `resolved_host` is populated whenever a
+    // prior cold-boot (this request's or an earlier one, for an
+    // already-warm service) resolved a dynamic host; otherwise falls back to
+    // the static `placement.ip`/`primary_service` config value.
+    let host = runtime.resolved_host().unwrap_or_else(|| service_cfg.upstream_host().to_string());
+    let target_url = build_target_url(&host, service_cfg.placement.port, &subpath);
     let mut outbound_req = state.http_client.request(req.method().clone(), &target_url);
 
     // 7. Handle Upstream Token Translation / Credential Injection

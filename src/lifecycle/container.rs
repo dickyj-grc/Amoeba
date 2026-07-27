@@ -1,6 +1,7 @@
 //! Container start/stop, active connection counting, cooldown timers.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Runtime tracker for active connections and activity timestamps.
@@ -13,6 +14,12 @@ pub struct ServiceRuntimeState {
     /// `should_scale_to_zero`/`is_occupying_capacity` for a full cooldown
     /// window after startup or hot-reload.
     pub has_activated: AtomicBool,
+    /// The upstream host a driver dynamically resolved at last cold-boot
+    /// (e.g. `AppleContainerDriver`, whose containers get a fresh IP on every
+    /// start with no stable DNS name). `None` for drivers that never call
+    /// `set_resolved_host` (Docker/Compose), in which case the proxy falls
+    /// back to the static `placement.ip`/`primary_service` config value.
+    resolved_host: RwLock<Option<String>>,
 }
 
 impl ServiceRuntimeState {
@@ -21,12 +28,21 @@ impl ServiceRuntimeState {
             last_accessed_unix: AtomicU64::new(now_unix()),
             active_connections: AtomicU64::new(0),
             has_activated: AtomicBool::new(false),
+            resolved_host: RwLock::new(None),
         }
     }
 
     pub fn touch(&self) {
         self.last_accessed_unix.store(now_unix(), Ordering::Relaxed);
         self.has_activated.store(true, Ordering::Relaxed);
+    }
+
+    pub fn resolved_host(&self) -> Option<String> {
+        self.resolved_host.read().unwrap().clone()
+    }
+
+    pub fn set_resolved_host(&self, host: String) {
+        *self.resolved_host.write().unwrap() = Some(host);
     }
 }
 
@@ -79,6 +95,19 @@ mod tests {
     fn new_state_starts_with_no_active_connections() {
         let state = ServiceRuntimeState::new();
         assert_eq!(state.active_connections.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn resolved_host_starts_none() {
+        let state = ServiceRuntimeState::new();
+        assert_eq!(state.resolved_host(), None);
+    }
+
+    #[test]
+    fn set_resolved_host_is_visible_via_resolved_host() {
+        let state = ServiceRuntimeState::new();
+        state.set_resolved_host("192.168.64.3".to_string());
+        assert_eq!(state.resolved_host(), Some("192.168.64.3".to_string()));
     }
 
     #[test]

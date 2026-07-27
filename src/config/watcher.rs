@@ -106,14 +106,36 @@ fn validate_stack_spec_mode(catalog: &ServiceCatalog) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `svc`'s machine lists `"apple-container"` among its `drivers`.
+/// Assumes `validate_machine_references` has already run (so `catalog.machines`
+/// lookups here are meaningful, not just defensively `None`-safe).
+fn service_uses_apple_container(svc: &super::schema::ServiceConfig, catalog: &ServiceCatalog) -> bool {
+    svc.machine_name(catalog)
+        .and_then(|m| catalog.machines.get(m))
+        .is_some_and(|m| m.drivers.iter().any(|d| d == "apple-container"))
+}
+
 /// A `container` workload routes via `placement.ip`; a `stack_spec` workload
 /// routes via `placement.primary_service`. Requiring the other field be
 /// absent (rather than just ignoring it) fails closed on a config that would
 /// otherwise silently route somewhere the operator didn't intend.
+///
+/// Exception: a `container` workload on an `apple-container` machine must
+/// *omit* `placement.ip` instead of requiring it — that driver assigns each
+/// container a fresh IP on every start with no stable, host-resolvable name,
+/// so the upstream host is resolved dynamically at runtime rather than read
+/// from static config (see `lifecycle::apple_container`).
 fn validate_placement_host(catalog: &ServiceCatalog) -> Result<(), String> {
     for (name, svc) in &catalog.services {
         if svc.container.is_some() {
-            if svc.placement.ip.is_none() {
+            if service_uses_apple_container(svc, catalog) {
+                if svc.placement.ip.is_some() {
+                    return Err(format!(
+                        "service '{name}' is on an apple-container machine, which assigns IPs \
+                         dynamically at start-time — placement.ip must be omitted"
+                    ));
+                }
+            } else if svc.placement.ip.is_none() {
                 return Err(format!("service '{name}' has a container workload but no placement.ip"));
             }
             if svc.placement.primary_service.is_some() {
@@ -161,12 +183,15 @@ fn validate_placement_type(catalog: &ServiceCatalog) -> Result<(), String> {
     Ok(())
 }
 
-/// `"docker"` is the only supported driver today.
+/// `"docker"` (bollard + Docker Engine API) and `"apple-container"` (Apple's
+/// native `container` CLI, macOS/Apple Silicon only) are the only supported
+/// drivers today.
 fn validate_driver_supported(catalog: &ServiceCatalog) -> Result<(), String> {
     for (name, machine) in &catalog.machines {
-        if !machine.drivers.iter().any(|d| d == "docker") {
+        if !machine.drivers.iter().any(|d| d == "docker" || d == "apple-container") {
             return Err(format!(
-                "machine '{name}' has no supported driver (only \"docker\" is supported today): {:?}",
+                "machine '{name}' has no supported driver (only \"docker\"/\"apple-container\" are \
+                 supported today): {:?}",
                 machine.drivers
             ));
         }
@@ -500,6 +525,40 @@ mod tests {
             }
         }"#;
         let path = write_temp_catalog("unsupported-driver", json);
+        assert!(load_catalog(&path).is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_catalog_accepts_apple_container_driver() {
+        let json = r#"{
+            "version": 1,
+            "machines": { "local": { "type": "vm", "drivers": ["apple-container"], "resources": {} } },
+            "services": {
+                "svc": {
+                    "placement": { "type": "vm", "port": 11434, "cooldown_seconds": 60 },
+                    "container": { "image": "ollama/ollama:latest" }
+                }
+            }
+        }"#;
+        let path = write_temp_catalog("apple-container-ok", json);
+        assert!(load_catalog(&path).is_ok());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_catalog_errors_when_apple_container_service_sets_placement_ip() {
+        let json = r#"{
+            "version": 1,
+            "machines": { "local": { "type": "vm", "drivers": ["apple-container"], "resources": {} } },
+            "services": {
+                "svc": {
+                    "placement": { "type": "vm", "ip": "192.168.64.2", "port": 11434 },
+                    "container": { "image": "ollama/ollama:latest" }
+                }
+            }
+        }"#;
+        let path = write_temp_catalog("apple-container-with-ip", json);
         assert!(load_catalog(&path).is_err());
         std::fs::remove_file(&path).ok();
     }

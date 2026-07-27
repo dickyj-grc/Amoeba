@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "machines": {
+    "local": {
+      "type": "vm",
+      "drivers": ["apple-container"],
+      "resources": { "memory": "16Gi" }
+    }
+  },
+  "services": {
+    "gemma4": {
+      "placement": { "type": "vm", "port": 11434, "cooldown_seconds": 180 },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "8Gi" } }
+      },
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    }
+  }
+}

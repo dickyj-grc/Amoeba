@@ -139,7 +139,7 @@ impl ComposeDriver {
         if output.status.success() {
             Ok(())
         } else {
-            Err(DriverError::ComposeFailed {
+            Err(DriverError::CommandFailed {
                 command: command.to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             })

@@ -33,3 +33,8 @@ fn services_cloud_example_json_is_valid() {
 fn services_capacity_example_json_is_valid() {
     assert_valid("config/services.capacity.example.json");
 }
+
+#[test]
+fn services_applecontainer_example_json_is_valid() {
+    assert_valid("config/services.applecontainer.example.json");
+}

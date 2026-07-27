@@ -58,7 +58,7 @@
             "container_name": "gorules-brms",
             "ports": ["3000"],
             "depends_on": ["postgres"],
-            "networks": ["gorules_network", "proxy-network"]
+            "networks": ["gorules_network", "amoeba-net"]
           },
           "postgres": {
             "image": "postgres:18.4",

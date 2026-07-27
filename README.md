@@ -113,7 +113,7 @@ Every service declares **where** it's reached (`placement`) and **how Amoeba dri
 }
 ```
 
-`machines` and `placement.machine` can be omitted while there's only ever **one** machine — it's implied. They become required fields once a second machine exists (see 2.3).
+`machines` and `placement.machine` can be omitted while there's only ever **one** machine — it's implied. They become required fields once a second machine exists (see 2.4).
 
 **`public` (optional, defaults to `false`)** — set `"public": true` on a service to skip JWT verification and the permission check entirely for it. This is an explicit opt-in: a service with `permissions` omitted or empty is *not* public by default — it still requires a valid token, it just denies every role (fails closed with `403`) until you add roles to `permissions`. Only use `public: true` for endpoints that are genuinely meant to be reachable with no auth at all (e.g. a health check or webhook receiver).
 
@@ -172,7 +172,35 @@ See `config/services.local.example.json` for these two alongside a `container` s
 
 **`env_from_secret`** (optional) — `env var name -> "<service>/<key>"`, resolved fresh at every start from `<AMOEBA_SECRETS_DIR, default /etc/amoeba/secrets>/<service>/<key>` and injected directly into the container/compose-subprocess environment. Never written into Amoeba's own config or a generated compose file — a referenced compose file needs to consume it via normal Compose variable interpolation (`${DB_PASSWORD}`) or the `environment: [DB_PASSWORD]` passthrough shorthand.
 
-### 2.3 Machine Capacity Gating (optional)
+### 2.3 A Second `container` Backend: `apple-container` (macOS/Apple Silicon)
+
+A machine's `drivers` list picks which backend drives its `container`-workload services. `drivers: ["docker"]` (the default assumed throughout this doc) talks to the Docker Engine API. `drivers: ["apple-container"]` instead shells out to Apple's native `container` CLI — one lightweight Linux micro-VM per container via Containerization + Virtualization.framework, with sub-second boots and no Docker Desktop/OrbStack VM overhead. It accepts ordinary Docker image references (`ollama/ollama:latest` resolves to `docker.io/library/...` exactly like the Docker CLI) and requires `container system start` to have been run once beforehand.
+
+```json
+{
+  "version": 1,
+  "machines": {
+    "local": { "type": "vm", "drivers": ["apple-container"], "resources": { "memory": "16Gi" } }
+  },
+  "services": {
+    "gemma4": {
+      "placement": { "type": "vm", "port": 11434, "cooldown_seconds": 180 },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "8Gi" } }
+      },
+      "permissions": { "read": ["admin", "analyst"] },
+      "upstream_auth": null
+    }
+  }
+}
+```
+
+See `config/services.applecontainer.example.json`. Note what's *missing*: **`placement.ip` is omitted, and validation requires it stay that way** for a `container` workload on an `apple-container` machine. Apple's `container` tool assigns each container a fresh IP on every start (confirmed by hand: stopping and restarting the same container moved it from `192.168.64.2` to `192.168.64.3`), and — unlike a Docker container on a shared bridge network — the bare macOS process running Amoeba can't resolve it by name; there's no DNS between the host and a `container`-managed VM. So the upstream host isn't a static config value here: Amoeba resolves it dynamically after every cold-boot (`container inspect`) and caches it in memory for warm requests to reuse, re-resolving again the next time the service cold-boots.
+
+`stack_spec` (2.2) has no `apple-container` equivalent yet — Apple's CLI has no compose-like multi-container orchestration today, so multi-container stacks always go through `docker compose` regardless of a machine's `drivers`.
+
+### 2.4 Machine Capacity Gating (optional)
 
 Rather than have the orchestrator introspect the host's real CPU/memory (which doesn't work consistently across bare metal, Docker cgroup limits, and serverless sandboxes like RunPod/Modal — and can't see GPU/VRAM at all), operators **declare** a capacity budget per machine, and the orchestrator checks declared usage against it before admitting a request that would newly activate a service. No runtime introspection, no platform-specific behavior.
 
@@ -204,7 +232,7 @@ See `config/services.capacity.example.json` for a fuller example with multiple s
 - **On exceeding budget**: the request is rejected with `503 Service Unavailable` before any upstream call is attempted. No queueing — retry later.
 - **Resource usage is per-service, not per-request**: a container's `resources.limits` represents its footprint while running. N concurrent calls to an already-warm service still count as one instance of its declared resources, not N×. Once a service is warm (within its `cooldown_seconds` window, or always-on when `cooldown_seconds` is omitted), further requests to it aren't re-checked against the budget — only the request that newly activates a cold service is gated, and only that same moment triggers the driver's cold-boot (2.2) too.
 
-### 2.4 Subpath Mapping Protocol
+### 2.5 Subpath Mapping Protocol
 
 Routing does not require unique DNS subdomains. Any service is reachable via path parameters:
 
