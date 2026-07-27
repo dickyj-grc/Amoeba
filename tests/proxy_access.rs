@@ -23,6 +23,7 @@ struct TestClaims {
     org_id: Option<String>,
     roles: Vec<String>,
     exp: usize,
+    jti: String,
 }
 
 fn token_with_roles(roles: &[&str]) -> String {
@@ -31,6 +32,7 @@ fn token_with_roles(roles: &[&str]) -> String {
         org_id: None,
         roles: roles.iter().map(|r| r.to_string()).collect(),
         exp: 9_999_999_999,
+        jti: "test-jti".into(),
     };
     encode(
         &Header::default(),
@@ -88,7 +90,7 @@ fn build_app(services_file: &str) -> Router {
     unsafe { std::env::set_var("AMOEBA_READINESS_TIMEOUT_MS", "200") };
 
     let jwt_engine = std::sync::Arc::new(local_engine(JWT_SECRET));
-    let state = AppState::new(services_file, "/nonexistent/users.json", jwt_engine);
+    let state = AppState::new(services_file, "/nonexistent/users.json", jwt_engine, None);
 
     Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))

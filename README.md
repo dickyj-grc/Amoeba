@@ -620,7 +620,39 @@ curl -X POST https://compute.yourdomain.com/admin/users \
 
 A request without a valid token gets `401`; a valid token without the `admin` role gets `403` — the same per-service pattern used for proxied requests (section 4), just with a fixed required role instead of a per-service permission map.
 
-### 6.4 Choosing Between Them
+### 6.4 Obtaining a Token: `POST /auth/login`
+
+In local JWT mode, call the public login endpoint with a username and password from `users.json`:
+
+```bash
+curl -X POST https://compute.yourdomain.com/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "dicky", "password": "hunter2"}'
+```
+
+On success it returns a short-lived JWT:
+
+```json
+{
+  "token": "eyJhbG...",
+  "expires_at": 1722070800
+}
+```
+
+Use the token as `Authorization: Bearer <token>` for subsequent API calls. Token lifetime defaults to 1 hour and can be changed with `AMOEBA_TOKEN_TTL_SECONDS`.
+
+### 6.5 Revoking a Token: `POST /auth/revoke`
+
+An admin can revoke their own current token (or any token they hold) before it naturally expires:
+
+```bash
+curl -X POST https://compute.yourdomain.com/auth/revoke \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Revocation is stored in memory only and is lost when the process restarts. After restart, every caller must log in again.
+
+### 6.6 Choosing Between User Management Paths
 
 - **CLI**: local/break-glass only. Whoever can shell into the host and write `/etc/amoeba/users.json` can run it — there's no additional app-level auth on top, so restrict host/SSH access accordingly.
 - **API**: the ongoing, day-to-day path. Every action is tied to a real `sub` in an admin's JWT, giving you an audit trail the CLI doesn't. Consider binding `/admin/*` to an internal-only network or loopback port in front-line deployments, as defense in depth beyond the role check.

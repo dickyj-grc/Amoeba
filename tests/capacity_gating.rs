@@ -53,7 +53,7 @@ fn build_app(services_file: &str) -> Router {
     unsafe { std::env::set_var("AMOEBA_READINESS_TIMEOUT_MS", "200") };
 
     let jwt_engine = std::sync::Arc::new(local_engine("test-capacity-gating-secret"));
-    let state = AppState::new(services_file, "/nonexistent/users.json", jwt_engine);
+    let state = AppState::new(services_file, "/nonexistent/users.json", jwt_engine, None);
 
     Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))

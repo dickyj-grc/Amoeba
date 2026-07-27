@@ -44,6 +44,7 @@ mod tests {
             org_id: None,
             roles: roles.iter().map(|r| r.to_string()).collect(),
             exp: 0,
+            jti: "jti-test".into(),
         }
     }
 

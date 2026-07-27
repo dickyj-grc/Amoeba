@@ -3,9 +3,11 @@
 pub mod jwks;
 pub mod jwt;
 pub mod middleware;
+pub mod revocation;
 pub mod users;
 
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
+use revocation::InMemoryRevocationStore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -16,6 +18,7 @@ pub struct Claims {
     pub org_id: Option<String>,
     pub roles: Vec<String>,
     pub exp: usize,
+    pub jti: String,
 }
 
 #[derive(Clone)]
@@ -33,16 +36,17 @@ pub enum AuthMode {
 pub struct JwtEngine {
     pub mode: AuthMode,
     pub validation: Validation,
+    pub revocation_store: Option<InMemoryRevocationStore>,
 }
 
 impl JwtEngine {
     pub async fn verify_token(&self, token: &str) -> Result<Claims, String> {
-        match &self.mode {
+        let claims = match &self.mode {
             AuthMode::LocalJwt { secret } => {
                 let key = DecodingKey::from_secret(secret);
                 decode::<Claims>(token, &key, &self.validation)
                     .map(|d| d.claims)
-                    .map_err(|e| format!("Local HMAC failed: {}", e))
+                    .map_err(|e| format!("Local HMAC failed: {}", e))?
             }
             AuthMode::Jwks { cached_keys, .. } => {
                 let header = decode_header(token).map_err(|e| e.to_string())?;
@@ -54,9 +58,17 @@ impl JwtEngine {
                 let decoding_key = DecodingKey::from_jwk(jwk).map_err(|e| e.to_string())?;
                 decode::<Claims>(token, &decoding_key, &self.validation)
                     .map(|d| d.claims)
-                    .map_err(|e| format!("JWKS validation failed: {}", e))
+                    .map_err(|e| format!("JWKS validation failed: {}", e))?
+            }
+        };
+
+        if let Some(store) = &self.revocation_store {
+            if store.is_revoked(&claims.jti).await {
+                return Err("Token has been revoked".to_string());
             }
         }
+
+        Ok(claims)
     }
 }
 
@@ -72,6 +84,7 @@ mod tests {
                 secret: secret.as_bytes().to_vec(),
             },
             validation: Validation::default(),
+            revocation_store: None,
         }
     }
 
@@ -88,6 +101,7 @@ mod tests {
             org_id: Some("org-1".into()),
             roles: vec!["admin".into()],
             exp,
+            jti: "jti-1".into(),
         }
     }
 

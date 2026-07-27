@@ -27,6 +27,7 @@ struct TestClaims {
     org_id: Option<String>,
     roles: Vec<String>,
     exp: usize,
+    jti: String,
 }
 
 fn token_with_roles(roles: &[&str]) -> String {
@@ -35,6 +36,7 @@ fn token_with_roles(roles: &[&str]) -> String {
         org_id: None,
         roles: roles.iter().map(|r| r.to_string()).collect(),
         exp: 9_999_999_999,
+        jti: "test-jti".into(),
     };
     encode(
         &Header::default(),
@@ -57,7 +59,7 @@ fn temp_users_file(label: &str) -> String {
 
 fn build_app(users_file: &str) -> Router {
     let jwt_engine = std::sync::Arc::new(local_engine(JWT_SECRET));
-    let state = AppState::new("/nonexistent/services.json", users_file, jwt_engine);
+    let state = AppState::new("/nonexistent/services.json", users_file, jwt_engine, None);
 
     let admin_routes = Router::new()
         .route("/users", post(create_user))

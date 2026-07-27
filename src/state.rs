@@ -1,5 +1,6 @@
 //! Shared application state: config catalog, runtime tracking, auth engine.
 
+use crate::auth::revocation::InMemoryRevocationStore;
 use crate::auth::JwtEngine;
 use crate::config::schema::ServiceCatalog;
 use crate::config::watcher::{load_catalog, spawn_file_watcher};
@@ -22,12 +23,18 @@ pub struct AppState {
     pub runtime_states: ArcSwap<HashMap<String, Arc<ServiceRuntimeState>>>,
     pub drivers: ArcSwap<HashMap<String, Arc<ServiceDriver>>>,
     pub jwt_engine: Arc<JwtEngine>,
+    pub revocation_store: Option<InMemoryRevocationStore>,
     pub http_client: reqwest::Client,
     pub users_file: String,
 }
 
 impl AppState {
-    pub fn new(config_path: &str, users_file: &str, jwt_engine: Arc<JwtEngine>) -> Arc<Self> {
+    pub fn new(
+        config_path: &str,
+        users_file: &str,
+        jwt_engine: Arc<JwtEngine>,
+        revocation_store: Option<InMemoryRevocationStore>,
+    ) -> Arc<Self> {
         let initial_catalog = load_catalog(config_path).unwrap_or_else(|_| ServiceCatalog {
             version: 1,
             machines: HashMap::new(),
@@ -66,6 +73,7 @@ impl AppState {
             runtime_states: ArcSwap::from_pointee(initial_runtimes),
             drivers: ArcSwap::from_pointee(initial_drivers),
             jwt_engine,
+            revocation_store,
             http_client,
             users_file: users_file.to_string(),
         });

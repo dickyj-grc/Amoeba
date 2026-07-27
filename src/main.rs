@@ -1,6 +1,8 @@
-use amoeba::auth::jwt::local_engine;
+use amoeba::auth::jwt::local_engine_with_revocation;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
+use amoeba::auth::revocation::InMemoryRevocationStore;
 use amoeba::routing::admin::{create_user, delete_user, update_user};
+use amoeba::routing::auth::{login, revoke};
 use amoeba::routing::proxy::proxy_handler;
 use amoeba::state::AppState;
 use axum::{
@@ -24,13 +26,15 @@ async fn main() {
         warn!("AMOEBA_LOCAL_JWT_SECRET not set; using an insecure default (do not use this in production)");
         "super_secret_local_key_change_in_production".to_string()
     });
-    let jwt_engine = Arc::new(local_engine(jwt_secret));
+    let revocation_store = InMemoryRevocationStore::new();
+    let jwt_engine = Arc::new(local_engine_with_revocation(jwt_secret, revocation_store.clone()));
 
     // Initialize App State & Dynamic File Watchers
     let app_state = AppState::new(
         "/etc/amoeba/services.json",
         "/etc/amoeba/users.json",
         jwt_engine,
+        Some(revocation_store),
     );
 
     // Admin-only user management routes: require both a valid JWT and the "admin"
@@ -46,12 +50,26 @@ async fn main() {
             unified_auth_middleware,
         ));
 
+    // Auth routes: login is public; revoke requires a valid JWT (admin role checked
+    // inside the handler after the middleware attaches Claims).
+    let revoke_route = Router::new()
+        .route("/revoke", post(revoke))
+        .route_layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            unified_auth_middleware,
+        ));
+
+    let auth_routes = Router::new()
+        .route("/login", post(login))
+        .merge(revoke_route);
+
     // Proxy routes handle their own auth inside proxy_handler, since whether a
     // token is required at all depends on the target service's "public" flag,
     // which isn't known until the service catalog has been consulted.
     let app = Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))
         .nest("/admin", admin_routes)
+        .nest("/auth", auth_routes)
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
