@@ -17,6 +17,56 @@ The **Amoeba Compute Orchestrator (`amoeba`)** is an edge-aware, scale-to-zero L
 
 ---
 
+## Why Amoeba?
+
+### 1. Cut Energy and Infrastructure Costs
+Amoeba's scale-to-zero lifecycle means workloads are only running when they are actually being used.
+
+- **Local machines**: a home lab or workstation no longer has to keep every container — GPU models, scrapers, databases, dashboards — idling 24/7. Services cold-boot on demand and stop after a configurable cooldown, directly reducing power draw and fan noise.
+- **Cloud VMs**: because containers are started only when requested, a single VM can host far more services than it could if everything were always-on. You pay for compute only when it is being used, and you can pack more workloads onto smaller instances.
+
+### 2. Add Zero-Trust Auth to Any Open Source Project
+Many excellent open-source tools ship with no authentication layer. Amoeba sits in front of them and enforces JWT-based access control without modifying the upstream application.
+
+- Every service gets role-based permissions (`read`, `add`, `update`, `delete`) out of the box.
+- Local HMAC mode lets you bootstrap users from a simple JSON file.
+- JWKS mode lets you plug in a corporate identity provider for multi-tenant deployments.
+
+### 3. Deploy New Apps Without Subdomain or SSL Plumbing
+Adding a containerized app usually means DNS records, reverse-proxy rules, TLS certificates, and port management. Amoeba removes that toil:
+
+- New services are reached via `/v1/<service_name>/<subpath>`; no custom subdomain is required.
+- The edge proxy (Caddy, Traefik, etc.) handles SSL termination once for the whole gateway.
+- Adding or removing an app is a single entry in `services.json`; Amoeba hot-reloads it without a restart.
+
+### 4. Protect Machine Resources With Declared Capacity Budgets
+Instead of guessing whether a machine can handle another workload, Amoeba enforces declared CPU, memory, and GPU-VRAM budgets before admitting a request that would cold-start a service.
+
+- Services declare their footprint in `services.json`.
+- Amoeba sums currently-occupying siblings and rejects the request with `503` if the new workload would exceed the budget.
+- This lets you safely pack more services onto the same box without accidentally starving the GPU or RAM.
+
+### 5. Built-In Usage Metering and Auditability
+Every proxied request emits a telemetry log containing the caller, organization, service, operation, status code, and latency.
+
+- No extra observability tooling is required to answer "who called what and when."
+- The same logs form the basis for chargeback, debugging, and security auditing.
+
+### 6. Secure Secrets and Upstream Credential Translation
+Amoeba keeps sensitive material out of your compose files and config while bridging different auth schemes between callers and backends.
+
+- `env_from_secret` injects secrets from a protected directory at container-start time.
+- `upstream_auth` can replace the caller's JWT with a backend-specific static token or custom header before forwarding the request.
+
+### 7. Minimal, Self-Hosted, and Portable
+Amoeba is designed for environments where you want control without operational overhead.
+
+- The release image is a small static binary; no Kubernetes or managed control plane is required.
+- Works with Docker on Linux/Windows and Apple's native `container` CLI on macOS/Apple Silicon.
+- Each machine runs its own instance with its own config, so scaling out is as simple as adding another box.
+
+---
+
 ## 1. System Architecture Overview
 
 The system follows a two-tier architecture: **Edge Reverse Proxy Layer** (public-facing) and **Compute Orchestrator Layer** (internal control plane).
