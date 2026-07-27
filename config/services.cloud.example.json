@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "machines": {
+    "cloud-vm-1": {
+      "type": "vm",
+      "drivers": ["docker"],
+      "resources": { "memory": "8Gi", "cpu_cores": 4 }
+    }
+  },
+  "services": {
+    "docling": {
+      "placement": { "type": "vm", "ip": "localhost", "port": 5000, "cooldown_seconds": 120 },
+      "container": {
+        "image": "ds4sd/docling-serve:latest",
+        "resources": { "limits": { "memory": "4Gi", "cpu_cores": 2 } }
+      },
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "machines": {
+    "local": {
+      "type": "vm",
+      "drivers": ["docker"],
+      "resources": { "memory": "16Gi", "gpu_vram": "8Gi" }
+    }
+  },
+  "scheduling": {
+    "strategy": "best_fit",
+    "retry": { "max_attempts": 3, "interval_seconds": 15 },
+    "fallback": { "enabled": true, "provider": "aws-lambda", "region": "us-east-1" }
+  },
+  "services": {
+    "gemma4": {
+      "placement": { "type": "vm", "ip": "gemma4", "port": 11434, "cooldown_seconds": 180 },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "8Gi", "gpu_vram": "8Gi" } }
+      },
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    },
+    "gorules": {
+      "placement": {
+        "type": "vm",
+        "cooldown_seconds": 1800,
+        "primary_service": "gorules",
+        "port": 80
+      },
+      "stack_spec": {
+        "compose_file": "/etc/amoeba/stacks/gorules/docker-compose.yml",
+        "project_name": "gorules"
+      },
+      "permissions": {
+        "read": ["admin", "analyst"]
+      },
+      "env_from_secret": { "DB_PASSWORD": "gorules/db_password" },
+      "upstream_auth": null
+    },
+    "brms": {
+      "placement": {
+        "type": "vm",
+        "cooldown_seconds": 1800,
+        "primary_service": "brms",
+        "port": 3000
+      },
+      "stack_spec": {
+        "compose_version": "3.8",
+        "env_vars": { "LOG_LEVEL": "info" },
+        "services": {
+          "brms": {
+            "image": "gorules/brms:latest",
+            "container_name": "gorules-brms",
+            "ports": ["3000"],
+            "depends_on": ["postgres"],
+            "networks": ["gorules_network", "proxy-network"]
+          },
+          "postgres": {
+            "image": "postgres:18.4",
+            "container_name": "gorules-postgres",
+            "networks": ["gorules_network"]
+          }
+        }
+      },
+      "permissions": {
+        "read": ["admin", "analyst"]
+      },
+      "env_from_secret": { "DB_PASSWORD": "brms/db_password" },
+      "upstream_auth": null
+    }
+  }
+}

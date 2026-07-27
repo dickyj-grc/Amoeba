@@ -72,26 +72,24 @@ Services are defined declaratively in `/etc/amoeba/services.json`. The orchestra
 
 ### 2.1 Configuration Schema (`services.json`)
 
+Every service declares **where** it's reached (`placement`) and **how Amoeba drives its container lifecycle** — exactly one of `container` (a single image Amoeba starts/stops directly) or `stack_spec` (a multi-container stack driven through the `docker compose` CLI):
+
 ```json
 {
+  "version": 1,
+  "machines": {
+    "local": { "type": "vm", "drivers": ["docker"], "resources": { "memory": "16Gi" } }
+  },
   "services": {
     "gemma4": {
-      "image": "ollama/ollama:latest",
-      "ip": "192.168.100.20",
-      "port": 11434,
-      "memory": "16g",
-      "cooldown_seconds": 60,
+      "placement": { "type": "vm", "ip": "gemma4", "port": 11434, "cooldown_seconds": 180 },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "8Gi" } }
+      },
       "operation_rules": [
-        {
-          "operation": "read",
-          "match_type": "http_method",
-          "values": ["GET", "HEAD"]
-        },
-        {
-          "operation": "execute",
-          "match_type": "http_method",
-          "values": ["POST"]
-        }
+        { "operation": "read", "match_type": "http_method", "values": ["GET", "HEAD"] },
+        { "operation": "execute", "match_type": "http_method", "values": ["POST"] }
       ],
       "permissions": {
         "read": ["admin", "analyst", "viewer"],
@@ -100,11 +98,8 @@ Services are defined declaratively in `/etc/amoeba/services.json`. The orchestra
       "upstream_auth": null
     },
     "docling": {
-      "image": "ds4sd/docling-serve:latest",
-      "ip": "192.168.100.40",
-      "port": 5000,
-      "memory": "4g",
-      "cooldown_seconds": 120,
+      "placement": { "type": "vm", "ip": "docling", "port": 5000, "cooldown_seconds": 120 },
+      "container": { "image": "ds4sd/docling-serve:latest" },
       "permissions": {
         "read": ["admin", "analyst"],
         "add": ["admin", "analyst"]
@@ -116,12 +111,100 @@ Services are defined declaratively in `/etc/amoeba/services.json`. The orchestra
     }
   }
 }
-
 ```
+
+`machines` and `placement.machine` can be omitted while there's only ever **one** machine — it's implied. They become required fields once a second machine exists (see 2.3).
 
 **`public` (optional, defaults to `false`)** — set `"public": true` on a service to skip JWT verification and the permission check entirely for it. This is an explicit opt-in: a service with `permissions` omitted or empty is *not* public by default — it still requires a valid token, it just denies every role (fails closed with `403`) until you add roles to `permissions`. Only use `public: true` for endpoints that are genuinely meant to be reachable with no auth at all (e.g. a health check or webhook receiver).
 
-### 2.2 Subpath Mapping Protocol
+### 2.2 Workload Types: `container` vs. `stack_spec`
+
+A service is exactly one of two shapes — validated at load time (both startup and hot-reload), rejecting a service that sets both or neither:
+
+**`container`** — a single image. Amoeba owns the full lifecycle directly via the Docker Engine API (create/start on cold boot, stop on cooldown). `placement.ip` is both the upstream host *and* the name Amoeba creates the container under, attached to the shared Docker network (`AMOEBA_DOCKER_NETWORK`, default `amoeba-net`) so it's reachable by name from Amoeba's own container.
+
+**`stack_spec`** — a multi-container stack, driven through the `docker compose` CLI instead. `placement.primary_service` names which container in the stack the gateway routes to. Exactly one of:
+- **`compose_file`** — a path to a docker-compose file a human already wrote (e.g. a vendored product stack). Amoeba never re-derives it; it just runs `docker compose -f <file> -p <project_name> {up -d|start|stop}` against it.
+- **`services`** — an inline, Amoeba-authored stack (no file exists yet). Amoeba regenerates an equivalent compose file on disk before every start, then drives it through the identical CLI path. Every network a service references defaults to `external: true` (must already exist — e.g. a network shared with Amoeba's own container) unless `stack_spec.networks` explicitly marks it `{"external": false}` to have this stack create it fresh.
+
+`project_name` defaults to the service's own key when omitted. A **cooldown on a `stack_spec` service always means `stop`, not `down`** — containers/networks stick around so the next activation is a fast `start` rather than a full `up -d` reconciliation.
+
+```json
+{
+  "gorules": {
+    "placement": { "type": "vm", "cooldown_seconds": 1800, "primary_service": "gorules", "port": 80 },
+    "stack_spec": {
+      "compose_file": "/etc/amoeba/stacks/gorules/docker-compose.yml",
+      "project_name": "gorules"
+    },
+    "permissions": { "read": ["admin", "analyst"] },
+    "env_from_secret": { "DB_PASSWORD": "gorules/db_password" },
+    "upstream_auth": null
+  },
+  "brms": {
+    "placement": { "type": "vm", "cooldown_seconds": 1800, "primary_service": "brms", "port": 3000 },
+    "stack_spec": {
+      "compose_version": "3.8",
+      "env_vars": { "LOG_LEVEL": "info" },
+      "services": {
+        "brms": {
+          "image": "gorules/brms:latest",
+          "container_name": "gorules-brms",
+          "ports": ["3000"],
+          "depends_on": ["postgres"],
+          "networks": ["gorules_network", "proxy-network"]
+        },
+        "postgres": {
+          "image": "postgres:18.4",
+          "container_name": "gorules-postgres",
+          "networks": ["gorules_network"]
+        }
+      }
+    },
+    "permissions": { "read": ["admin", "analyst"] },
+    "env_from_secret": { "DB_PASSWORD": "brms/db_password" },
+    "upstream_auth": null
+  }
+}
+```
+
+See `config/services.local.example.json` for these two alongside a `container` service (`gemma4`) in one file — the three local-machine scenarios Amoeba supports today.
+
+**`env_from_secret`** (optional) — `env var name -> "<service>/<key>"`, resolved fresh at every start from `<AMOEBA_SECRETS_DIR, default /etc/amoeba/secrets>/<service>/<key>` and injected directly into the container/compose-subprocess environment. Never written into Amoeba's own config or a generated compose file — a referenced compose file needs to consume it via normal Compose variable interpolation (`${DB_PASSWORD}`) or the `environment: [DB_PASSWORD]` passthrough shorthand.
+
+### 2.3 Machine Capacity Gating (optional)
+
+Rather than have the orchestrator introspect the host's real CPU/memory (which doesn't work consistently across bare metal, Docker cgroup limits, and serverless sandboxes like RunPod/Modal — and can't see GPU/VRAM at all), operators **declare** a capacity budget per machine, and the orchestrator checks declared usage against it before admitting a request that would newly activate a service. No runtime introspection, no platform-specific behavior.
+
+```json
+{
+  "version": 1,
+  "machines": {
+    "gpu-box-1": { "type": "vm", "drivers": ["docker"], "resources": { "memory": "32Gi", "gpu_vram": "24Gi" } }
+  },
+  "services": {
+    "gemma4": {
+      "placement": {
+        "type": "vm", "ip": "gpu-box-1-gemma4", "port": 11434, "cooldown_seconds": 180, "machine": "gpu-box-1"
+      },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "16Gi", "gpu_vram": "16Gi" } }
+      },
+      "permissions": { "read": ["admin", "analyst"] }
+    }
+  }
+}
+```
+
+See `config/services.capacity.example.json` for a fuller example with multiple services sharing one machine.
+
+- **`placement.machine`** — the entry in the top-level `machines` map this service's usage counts against. Optional only while `machines` has exactly one entry (implied); referencing an undefined machine, or omitting it once a second machine exists, fails config validation (both at startup and on hot-reload) rather than silently skipping the gate or picking one arbitrarily.
+- **Quantities** (`memory`, `gpu_vram` on both a machine's `resources` and a container's `resources.limits`) accept Kubernetes-style sized strings (`"16Gi"`, `"512Mi"`) or a bare number (interpreted as MB). `cpu_cores` is always a bare count. **Every field is independently opt-in**: a field missing from a container's `resources.limits` means it requests zero of that dimension (never competes for or is blocked by that budget line); a field missing from a machine's budget means that dimension is completely unconstrained. Omitting `resources` entirely (or using a `stack_spec` workload, which never declares one) means the service requests nothing on any dimension — it's nominally "on" the machine but exempt from capacity accounting.
+- **On exceeding budget**: the request is rejected with `503 Service Unavailable` before any upstream call is attempted. No queueing — retry later.
+- **Resource usage is per-service, not per-request**: a container's `resources.limits` represents its footprint while running. N concurrent calls to an already-warm service still count as one instance of its declared resources, not N×. Once a service is warm (within its `cooldown_seconds` window, or always-on when `cooldown_seconds` is omitted), further requests to it aren't re-checked against the budget — only the request that newly activates a cold service is gated, and only that same moment triggers the driver's cold-boot (2.2) too.
+
+### 2.4 Subpath Mapping Protocol
 
 Routing does not require unique DNS subdomains. Any service is reachable via path parameters:
 
@@ -129,8 +212,8 @@ $$\text{Target URL} = \texttt{https://<host>/v1/<service\_name>/<subpath>}$$
 
 | Incoming Request Target | Extracted `service_name` | Extracted `subpath` | Upstream Proxy Destination |
 | --- | --- | --- | --- |
-| `POST /v1/gemma4/v1/chat/completions` | `gemma4` | `v1/chat/completions` | `[http://192.168.100.20:11434/v1/chat/completions](http://192.168.100.20:11434/v1/chat/completions)` |
-| `POST /v1/docling/api/v1/parse` | `docling` | `api/v1/parse` | `[http://192.168.100.40:5000/api/v1/parse](http://192.168.100.40:5000/api/v1/parse)` |
+| `POST /v1/gemma4/v1/chat/completions` | `gemma4` | `v1/chat/completions` | `[http://gemma4:11434/v1/chat/completions](http://gemma4:11434/v1/chat/completions)` |
+| `POST /v1/docling/api/v1/parse` | `docling` | `api/v1/parse` | `[http://docling:5000/api/v1/parse](http://docling:5000/api/v1/parse)` |
 
 ---
 
@@ -366,12 +449,12 @@ Any worker container joined to `amoeba-net` is reachable by its container/servic
 
 ```json
 {
+  "version": 1,
+  "machines": { "local": { "type": "vm", "drivers": ["docker"], "resources": {} } },
   "services": {
     "gemma4": {
-      "image": "ollama/ollama:latest",
-      "ip": "amoeba-gemma4-worker",
-      "port": 11434,
-      "cooldown_seconds": 180,
+      "placement": { "type": "vm", "ip": "amoeba-gemma4-worker", "port": 11434, "cooldown_seconds": 180 },
+      "container": { "image": "ollama/ollama:latest" },
       "permissions": { "read": ["admin", "analyst"] }
     }
   }
@@ -399,6 +482,44 @@ Editing `./config/services.json` on the host is picked up immediately by the orc
 1. **Zero system dependencies** — only Docker and Docker Compose are required; no Rust toolchain, Caddy, or system libraries need to be installed on the host.
 2. **Automatic TLS** — Caddy fetches and renews Let's Encrypt/ZeroSSL certificates on port 443 once `Caddyfile` points at a real domain with DNS pointing at the host.
 3. **Small image** — the multi-stage `Dockerfile` produces a ~30MB Alpine-based runtime image with just the two release binaries (`amoeba`, `amoeba-admin`) and CA certificates.
+
+### 5.6 Running Across Multiple Machines
+
+If your services are spread across more than one machine — say, a local box for a GPU model and a cloud VM for a lighter CPU-only service — run **one Amoeba instance per machine**, not one central instance trying to reach into the others.
+
+Each instance gets its **own** `services.json`, listing only the services physically on that box, with a `machines` entry for itself:
+
+```json
+// on the local machine
+{
+  "version": 1,
+  "machines": {
+    "local-machine": { "type": "vm", "drivers": ["docker"], "resources": { "memory": "32Gi", "gpu_vram": "8Gi" } }
+  },
+  "services": {
+    "gemma4": {
+      "placement": { "type": "vm", "ip": "localhost", "port": 11434, "cooldown_seconds": 180 },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "16Gi", "gpu_vram": "8Gi" } }
+      },
+      "permissions": { "read": ["admin", "analyst"] }
+    }
+  }
+}
+```
+
+See `config/services.local.example.json` and `config/services.cloud.example.json` for a full matching pair.
+
+Why per-machine rather than one shared file:
+
+- **`ip` only ever needs to be local** — `localhost`, a loopback address, or a Docker container name on that machine's own network. Nothing in a service's config ever needs to name another machine, since each instance never reaches outside its own host.
+- **Container lifecycle stays local** — each instance only ever needs to talk to its *own* Docker socket (the same `/var/run/docker.sock` mount `docker-compose.yml` already sets up) to eventually start/stop its own containers. There's no remote Docker API, no per-machine control agent, no SSH to build or secure.
+- **`machine`/`machines` naming stays unambiguous** — a service's `machine` field always refers to *this* instance's own machine, not a name that has to stay in sync across a shared file describing every box in the fleet.
+
+**Routing — independent entry points, no shared edge layer.** Each instance is reachable at its own address; they don't talk to each other. A cloud VM's instance can sit behind its own public Caddy exactly as in 5.2–5.3. A local machine's instance typically has no public IP (home networks sit behind NAT), so it's reachable only over a private tunnel (Tailscale, WireGuard, Cloudflare Tunnel) between the two — never exposed directly to the internet. Whoever calls a service just needs to know which endpoint to hit for it; that knowledge lives with the caller, not inside Amoeba.
+
+One thing this implies for auth: `AMOEBA_LOCAL_JWT_SECRET` and `users.json` are also per-instance. If you want the same caller/token to work against both machines, either configure the same JWT secret on both instances, or point both at the same `mode = "jwks"` identity provider (section 3) instead of two independent `local_jwt` stores.
 
 ---
 

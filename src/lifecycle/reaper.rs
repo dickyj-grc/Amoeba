@@ -3,7 +3,7 @@
 use super::container::{now_unix, should_scale_to_zero};
 use crate::state::AppState;
 use std::sync::{atomic::Ordering, Arc};
-use tracing::info;
+use tracing::{error, info};
 
 /// Spawns a background loop that checks each service's idle time against its
 /// configured cooldown and scales it to zero once exceeded.
@@ -14,10 +14,11 @@ pub fn spawn_reaper_thread(state: Arc<AppState>) {
 
             let catalog = state.catalog.load();
             let runtimes = state.runtime_states.load();
+            let drivers = state.drivers.load();
             let now = now_unix();
 
             for (name, service) in &catalog.services {
-                let Some(cooldown) = service.cooldown_seconds else {
+                let Some(cooldown) = service.placement.cooldown_seconds else {
                     continue;
                 };
                 let Some(runtime) = runtimes.get(name) else {
@@ -33,7 +34,14 @@ pub fn spawn_reaper_thread(state: Arc<AppState>) {
                         idle_secs = %now.saturating_sub(last),
                         "💤 Scaling service to zero (stopping container)"
                     );
-                    // TODO: Call Docker API (`/var/run/docker.sock`) or Fly Machine API to stop container
+
+                    if let Some(driver) = drivers.get(name) {
+                        // A failed stop just gets retried on the next sweep; it
+                        // never blocks the reaper loop from checking other services.
+                        if let Err(e) = driver.stop().await {
+                            error!(service = %name, "failed to stop service: {e}");
+                        }
+                    }
                 }
             }
         }

@@ -25,6 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower-http = { version = "0.5", features = ["trace"] }
 argon2 = "0.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
+bollard = "0.17"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

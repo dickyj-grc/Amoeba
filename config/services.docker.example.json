@@ -1,10 +1,16 @@
 {
+  "version": 1,
+  "machines": {
+    "local": {
+      "type": "vm",
+      "drivers": ["docker"],
+      "resources": {}
+    }
+  },
   "services": {
     "gemma4": {
-      "image": "ollama/ollama:latest",
-      "ip": "amoeba-gemma4-worker",
-      "port": 11434,
-      "cooldown_seconds": 180,
+      "placement": { "type": "vm", "ip": "amoeba-gemma4-worker", "port": 11434, "cooldown_seconds": 180 },
+      "container": { "image": "ollama/ollama:latest" },
       "permissions": {
         "read": ["admin", "analyst"],
         "add": ["admin", "analyst"]
@@ -12,10 +18,8 @@
       "upstream_auth": null
     },
     "docling": {
-      "image": "ds4sd/docling-serve:latest",
-      "ip": "amoeba-docling-worker",
-      "port": 5000,
-      "cooldown_seconds": 120,
+      "placement": { "type": "vm", "ip": "amoeba-docling-worker", "port": 5000, "cooldown_seconds": 120 },
+      "container": { "image": "ds4sd/docling-serve:latest" },
       "permissions": {
         "read": ["admin", "analyst"],
         "add": ["admin", "analyst"]

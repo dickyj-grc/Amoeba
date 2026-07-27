@@ -1,11 +1,16 @@
 {
+  "version": 1,
+  "machines": {
+    "local": {
+      "type": "vm",
+      "drivers": ["docker"],
+      "resources": {}
+    }
+  },
   "services": {
     "gemma4": {
-      "image": "ollama/ollama:latest",
-      "ip": "192.168.100.20",
-      "port": 11434,
-      "memory": "16g",
-      "cooldown_seconds": 60,
+      "placement": { "type": "vm", "ip": "gemma4", "port": 11434, "cooldown_seconds": 60 },
+      "container": { "image": "ollama/ollama:latest" },
       "operation_rules": [
         { "operation": "read", "match_type": "http_method", "values": ["GET", "HEAD"] },
         { "operation": "execute", "match_type": "http_method", "values": ["POST"] }

@@ -1,12 +1,18 @@
 //! Container start/stop, active connection counting, cooldown timers.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Runtime tracker for active connections and activity timestamps.
 pub struct ServiceRuntimeState {
     pub last_accessed_unix: AtomicU64,
     pub active_connections: AtomicU64,
+    /// Whether this service has ever received a real request. `new()` sets
+    /// `last_accessed_unix` to the construction time, so without this flag a
+    /// never-touched service would look "recently active" to
+    /// `should_scale_to_zero`/`is_occupying_capacity` for a full cooldown
+    /// window after startup or hot-reload.
+    pub has_activated: AtomicBool,
 }
 
 impl ServiceRuntimeState {
@@ -14,11 +20,13 @@ impl ServiceRuntimeState {
         Self {
             last_accessed_unix: AtomicU64::new(now_unix()),
             active_connections: AtomicU64::new(0),
+            has_activated: AtomicBool::new(false),
         }
     }
 
     pub fn touch(&self) {
         self.last_accessed_unix.store(now_unix(), Ordering::Relaxed);
+        self.has_activated.store(true, Ordering::Relaxed);
     }
 }
 
@@ -40,6 +48,27 @@ pub fn should_scale_to_zero(
     cooldown_seconds: u64,
 ) -> bool {
     active_connections == 0 && now_unix.saturating_sub(last_accessed_unix) >= cooldown_seconds
+}
+
+/// Whether a service is currently occupying its machine's capacity budget:
+/// mid-request, recently accessed within its cooldown window, or always-on
+/// (no cooldown configured, i.e. a warm/stateful service the reaper never
+/// manages). A service that has never activated never counts, regardless of
+/// how recent its constructor-time `last_accessed_unix` looks.
+pub fn is_occupying_capacity(
+    cooldown_seconds: Option<u64>,
+    has_activated: bool,
+    active_connections: u64,
+    last_accessed_unix: u64,
+    now_unix: u64,
+) -> bool {
+    match cooldown_seconds {
+        None => true,
+        Some(cooldown) => {
+            has_activated
+                && !should_scale_to_zero(active_connections, last_accessed_unix, now_unix, cooldown)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -79,5 +108,45 @@ mod tests {
     fn scale_check_does_not_underflow_when_clock_looks_stale() {
         // last_accessed_unix newer than now_unix should not panic/underflow.
         assert!(!should_scale_to_zero(0, 500, 200, 60));
+    }
+
+    #[test]
+    fn new_state_starts_not_activated() {
+        let state = ServiceRuntimeState::new();
+        assert!(!state.has_activated.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn touch_marks_runtime_state_as_activated() {
+        let state = ServiceRuntimeState::new();
+        state.touch();
+        assert!(state.has_activated.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn is_occupying_capacity_always_true_for_warm_stateful_service() {
+        assert!(is_occupying_capacity(None, false, 0, 0, 1_000_000));
+    }
+
+    #[test]
+    fn is_occupying_capacity_false_when_never_activated() {
+        // Even with a recent last_accessed_unix (as set by ServiceRuntimeState::new()),
+        // a service that has never received a real request should not count.
+        assert!(!is_occupying_capacity(Some(60), false, 0, 200, 200));
+    }
+
+    #[test]
+    fn is_occupying_capacity_true_when_active_connections_present() {
+        assert!(is_occupying_capacity(Some(60), true, 1, 100, 200));
+    }
+
+    #[test]
+    fn is_occupying_capacity_true_within_cooldown_window() {
+        assert!(is_occupying_capacity(Some(60), true, 0, 190, 200));
+    }
+
+    #[test]
+    fn is_occupying_capacity_false_once_cooldown_elapsed() {
+        assert!(!is_occupying_capacity(Some(60), true, 0, 100, 200));
     }
 }

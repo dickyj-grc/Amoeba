@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "machines": {
+    "gpu-box-1": {
+      "type": "vm",
+      "drivers": ["docker"],
+      "resources": { "memory": "32Gi", "gpu_vram": "24Gi" }
+    },
+    "cpu-box-1": {
+      "type": "vm",
+      "drivers": ["docker"],
+      "resources": { "memory": "8Gi", "cpu_cores": 4 }
+    }
+  },
+  "services": {
+    "gemma4": {
+      "placement": {
+        "type": "vm", "ip": "gpu-box-1-gemma4", "port": 11434, "cooldown_seconds": 180, "machine": "gpu-box-1"
+      },
+      "container": {
+        "image": "ollama/ollama:latest",
+        "resources": { "limits": { "memory": "16Gi", "gpu_vram": "16Gi" } }
+      },
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    },
+    "obscura": {
+      "placement": {
+        "type": "vm", "ip": "gpu-box-1-obscura", "port": 7000, "cooldown_seconds": 180, "machine": "gpu-box-1"
+      },
+      "container": {
+        "image": "obscura/obscura-serve:latest",
+        "resources": { "limits": { "memory": "8Gi", "gpu_vram": "8Gi" } }
+      },
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    },
+    "docling": {
+      "placement": {
+        "type": "vm", "ip": "cpu-box-1-docling", "port": 5000, "cooldown_seconds": 120, "machine": "cpu-box-1"
+      },
+      "container": { "image": "ds4sd/docling-serve:latest" },
+      "permissions": {
+        "read": ["admin", "analyst"],
+        "add": ["admin", "analyst"]
+      },
+      "upstream_auth": null
+    }
+  }
+}
