@@ -11,10 +11,11 @@ app:
 
 placement:
   port: 8080
-  cooldown_seconds: 60
+  cooldown_seconds: 30
 
 permissions:
-  read: [admin, analyst]
+  read: [admin, analyst, viewer]
+  add: [admin, analyst]
 
 resources:
   memory: 256Mi

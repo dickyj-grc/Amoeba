@@ -786,3 +786,63 @@ age -r age1... -o secrets/api_key.age < api_key.txt
 ```
 
 Include `secrets/api_key.age` in the zip. Amoeba decrypts it at install time and writes the plaintext to `/etc/amoeba/secrets/<app>/API_KEY`. User-provided secret values in the install payload still take precedence over encrypted files.
+
+---
+
+## 8. Nightly End-to-End Test on DigitalOcean
+
+A Python orchestrator spins up a DigitalOcean droplet, installs Caddy and Amoeba, exercises the admin/proxy APIs, verifies scale-to-zero, and destroys the droplet. It is designed to run nightly in GitHub Actions.
+
+### 8.1 Required GitHub Secrets
+
+| Secret | Purpose |
+|---|---|
+| `DIGITALOCEAN_TOKEN` | DO API personal access token |
+| `DO_SSH_PRIVATE_KEY` | Private SSH key for the droplet |
+| `DO_SSH_PUBLIC_KEY` | Public SSH key registered in DO |
+| `AMOEBA_LOCAL_JWT_SECRET` | Amoeba JWT signing secret |
+| `AMOEBA_AGE_SECRET_KEY` (optional) | Age identity for encrypted app secrets |
+
+### 8.2 Files
+
+- `scripts/e2e-do.py` — orchestrates the droplet lifecycle and tests
+- `scripts/e2e-cloud-init.sh` — cloud-init user-data that provisions the droplet
+- `.github/workflows/nightly-e2e.yml` — GitHub Actions schedule
+
+### 8.3 Run locally
+
+```bash
+export DIGITALOCEAN_TOKEN="dop_v1_..."
+export DO_SSH_PRIVATE_KEY="/path/to/id_ed25519"
+export DO_SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC..."
+export AMOEBA_LOCAL_JWT_SECRET="..."
+
+python3 -m pip install requests paramiko
+python scripts/e2e-do.py
+```
+
+Add `--keep` to leave the droplet alive for debugging.
+
+### 8.4 What the test verifies
+
+1. Droplet creation and SSH readiness.
+2. Amoeba + Caddy come up via Docker Compose.
+3. Admin login returns a JWT.
+4. `POST /admin/apps` installs the `hello-world` app package.
+5. `GET /admin/apps` lists the installed app.
+6. Admin creates `analyst` and `viewer` users with different roles.
+7. Role-based access control:
+   - `analyst` can read and add to `hello-world`.
+   - `viewer` can read but not add to `hello-world`.
+   - Non-admin users get `403` on `/admin/apps`.
+8. `GET /v1/hello-world/` returns the expected response and wakes the container.
+9. Error cases fail closed:
+   - Missing/invalid token on a private service → `401`
+   - Wrong password or unknown user login → `401`
+   - Unknown service → `404`
+   - Duplicate user creation → `409`
+   - Malformed or missing app package → `400`
+   - Non-admin user creation attempt → `403`
+   - Revoked token → `401`
+10. After the cooldown, the container is stopped (scale-to-zero).
+11. Droplet is destroyed.
