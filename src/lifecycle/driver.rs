@@ -225,6 +225,7 @@ fn build_container_driver(
         container.image.clone(),
         network.to_string(),
         memory_limit_mb,
+        container.env.clone(),
         svc.env_from_secret.clone(),
     ))
 }

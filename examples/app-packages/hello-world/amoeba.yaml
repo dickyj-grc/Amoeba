@@ -1,0 +1,27 @@
+api_version: v1
+name: hello-world
+version: 1.0.0
+description: A simple hello-world web app packaged for Amoeba.
+author: Amoeba Project
+
+app:
+  type: compose
+  compose_file: compose.yaml
+  primary_service: web
+
+placement:
+  port: 8080
+  cooldown_seconds: 60
+
+permissions:
+  read: [admin, analyst]
+
+resources:
+  memory: 256Mi
+
+schema:
+  env:
+    GREETING:
+      description: Greeting message shown by the app
+      type: string
+      default: Hello from Amoeba!

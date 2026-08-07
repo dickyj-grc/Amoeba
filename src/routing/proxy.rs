@@ -325,7 +325,7 @@ mod tests {
                 cooldown_seconds: None,
                 machine: None,
             },
-            container: Some(ContainerSpec { image: "img".into(), resources: None }),
+            container: Some(ContainerSpec { image: "img".into(), resources: None, env: HashMap::new() }),
             stack_spec: None,
             operation_rules: None,
             permissions: HashMap::new(),

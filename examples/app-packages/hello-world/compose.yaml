@@ -1,0 +1,11 @@
+services:
+  web:
+    image: hashicorp/http-echo:latest
+    container_name: amoeba-hello-world
+    command: ["-listen", ":8080", "-text", "${GREETING}"]
+    networks:
+      - amoeba-net
+
+networks:
+  amoeba-net:
+    external: true

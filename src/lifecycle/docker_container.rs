@@ -24,6 +24,8 @@ pub struct DockerContainerDriver {
     image: String,
     network: String,
     memory_limit_bytes: Option<i64>,
+    /// Non-sensitive environment variables set at container creation time.
+    env: HashMap<String, String>,
     env_from_secret: HashMap<String, String>,
 }
 
@@ -34,6 +36,7 @@ impl DockerContainerDriver {
         image: String,
         network: String,
         memory_limit_mb: Option<u64>,
+        env: HashMap<String, String>,
         env_from_secret: HashMap<String, String>,
     ) -> Self {
         Self {
@@ -42,6 +45,7 @@ impl DockerContainerDriver {
             image,
             network,
             memory_limit_bytes: memory_limit_mb.map(|mb| (mb * 1024 * 1024) as i64),
+            env,
             env_from_secret,
         }
     }
@@ -76,7 +80,8 @@ impl DockerContainerDriver {
 
     async fn create_and_start(&self) -> Result<(), DriverError> {
         let docker = self.docker()?;
-        let env = resolve_env_from_secret(&self.env_from_secret)?;
+        let mut env = self.env.clone();
+        env.extend(resolve_env_from_secret(&self.env_from_secret)?);
         let env: Vec<String> = env.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
 
         let host_config = HostConfig {

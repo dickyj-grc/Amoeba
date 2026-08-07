@@ -68,7 +68,7 @@ impl<'de> Deserialize<'de> for Quantity {
 /// Parses a Kubernetes-style IEC quantity string into MB. `Ki` rounds down to
 /// the nearest whole MB (sub-MB precision isn't meaningful for the memory/GPU
 /// budgets this is used for).
-fn parse_quantity_to_mb(s: &str) -> Result<u64, String> {
+pub fn parse_quantity_to_mb(s: &str) -> Result<u64, String> {
     let s = s.trim();
 
     for (suffix, mb_per_unit) in [("Ti", 1_048_576u64), ("Gi", 1_024), ("Mi", 1)] {
@@ -180,6 +180,10 @@ pub struct ContainerSpec {
     /// per-request cost). Omitting `resources` entirely means it requests
     /// nothing on any dimension, exempting it from capacity accounting.
     pub resources: Option<ContainerResources>,
+    /// Non-sensitive environment variables injected into the container at
+    /// start time. Added by the app-package manager for single-image apps.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

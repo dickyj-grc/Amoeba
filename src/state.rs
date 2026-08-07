@@ -26,6 +26,7 @@ pub struct AppState {
     pub revocation_store: Option<InMemoryRevocationStore>,
     pub http_client: reqwest::Client,
     pub users_file: String,
+    pub catalog_path: String,
 }
 
 impl AppState {
@@ -76,6 +77,7 @@ impl AppState {
             revocation_store,
             http_client,
             users_file: users_file.to_string(),
+            catalog_path: config_path.to_string(),
         });
 
         Self::watch_config(state.clone(), config_path.to_string(), config_dir, docker);
