@@ -12,8 +12,9 @@ use crate::config::schema::{
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -29,6 +30,7 @@ pub enum AppManagerError {
     Zip(zip::result::ZipError),
     Validation(String),
     Command(String),
+    Decrypt(String),
 }
 
 impl std::fmt::Display for AppManagerError {
@@ -40,6 +42,7 @@ impl std::fmt::Display for AppManagerError {
             AppManagerError::Zip(e) => write!(f, "zip error: {e}"),
             AppManagerError::Validation(msg) => write!(f, "validation error: {msg}"),
             AppManagerError::Command(msg) => write!(f, "command error: {msg}"),
+            AppManagerError::Decrypt(msg) => write!(f, "decryption error: {msg}"),
         }
     }
 }
@@ -71,16 +74,26 @@ impl From<zip::result::ZipError> for AppManagerError {
 }
 
 /// Coordinates app installs/uninstalls. Holds the path to Amoeba's service
-/// catalog and a mutex so concurrent catalog writes do not corrupt the file.
+/// catalog, an optional age identity for decrypting secret files, and a mutex
+/// so concurrent catalog writes do not corrupt the file.
 pub struct AppManager {
     catalog_path: PathBuf,
+    age_identity: Option<age::x25519::Identity>,
     lock: Mutex<()>,
 }
 
 impl AppManager {
     pub fn new(catalog_path: impl AsRef<Path>) -> Self {
+        Self::with_identity(catalog_path, age_identity_from_env())
+    }
+
+    pub fn with_identity(
+        catalog_path: impl AsRef<Path>,
+        identity: Option<age::x25519::Identity>,
+    ) -> Self {
         Self {
             catalog_path: catalog_path.as_ref().to_path_buf(),
+            age_identity: identity,
             lock: Mutex::new(()),
         }
     }
@@ -119,6 +132,10 @@ impl AppManager {
 
         let manifest: AppManifest = serde_yaml::from_reader(fs::File::open(&manifest_path)?)?;
         validate_manifest(&manifest)?;
+
+        let mut values = values;
+        decrypt_secret_files(&manifest, temp_dir.path(), self.age_identity.as_ref(), &mut values)
+            .await?;
         validate_values(&manifest, &values)?;
 
         let app_name = manifest.service_name().to_string();
@@ -305,6 +322,90 @@ fn validate_values(
     }
 
     Ok(())
+}
+
+async fn decrypt_secret_files(
+    manifest: &AppManifest,
+    package_root: &Path,
+    identity: Option<&age::x25519::Identity>,
+    values: &mut InstallValues,
+) -> Result<(), AppManagerError> {
+    let identity = match identity {
+        Some(id) => id,
+        None => {
+            // If no age identity is configured, encrypted secret files cannot be
+            // decrypted. This is only an error if the package actually uses them.
+            let any_encrypted = manifest
+                .schema
+                .secrets
+                .values()
+                .any(|f| f.file.is_some());
+            if any_encrypted {
+                return Err(AppManagerError::Decrypt(
+                    "package contains age-encrypted secret files but AMOEBA_AGE_SECRET_KEY is not set"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        }
+    };
+
+    for (key, field) in &manifest.schema.secrets {
+        let Some(file_path) = &field.file else { continue };
+
+        // User-provided values take precedence over encrypted files.
+        if values.secrets.contains_key(key) {
+            continue;
+        }
+
+        let full_path = package_root.join(file_path);
+        if !full_path.exists() {
+            return Err(AppManagerError::Validation(format!(
+                "secret file for '{key}' not found in package: {file_path}"
+            )));
+        }
+
+        let plaintext = decrypt_age_file(&full_path, &identity).await?;
+        let plaintext = String::from_utf8(plaintext).map_err(|e| {
+            AppManagerError::Decrypt(format!("secret '{key}' is not valid UTF-8: {e}"))
+        })?;
+
+        values.secrets.insert(key.clone(), plaintext);
+    }
+
+    Ok(())
+}
+
+fn age_identity_from_env() -> Option<age::x25519::Identity> {
+    std::env::var("AMOEBA_AGE_SECRET_KEY")
+        .ok()
+        .and_then(|key| age::x25519::Identity::from_str(&key).ok())
+}
+
+async fn decrypt_age_file(
+    path: &Path,
+    identity: &age::x25519::Identity,
+) -> Result<Vec<u8>, AppManagerError> {
+    let file = fs::File::open(path)?;
+    let decryptor = age::Decryptor::new(file)
+        .map_err(|e| AppManagerError::Decrypt(format!("failed to create age decryptor: {e}")))?;
+
+    let mut plaintext = Vec::new();
+    match decryptor {
+        age::Decryptor::Recipients(d) => {
+            let mut reader = d
+                .decrypt(std::iter::once(identity as &dyn age::Identity))
+                .map_err(|e| AppManagerError::Decrypt(format!("failed to decrypt recipients: {e}")))?;
+            reader.read_to_end(&mut plaintext)?;
+        }
+        age::Decryptor::Passphrase(_) => {
+            return Err(AppManagerError::Decrypt(
+                "passphrase-encrypted age files are not supported".to_string(),
+            ));
+        }
+    }
+
+    Ok(plaintext)
 }
 
 fn load_catalog(path: &Path) -> Result<ServiceCatalog, AppManagerError> {
@@ -582,5 +683,88 @@ schema:
         let catalog = load_catalog(&catalog_path).unwrap();
         assert!(!catalog.services.contains_key("test-image"));
         assert!(!temp_dir.path().join("secrets/test-image").exists());
+    }
+
+    fn package_zip_with_encrypted_secret(plaintext: &str, recipient: &age::x25519::Recipient) -> Vec<u8> {
+        let mut encrypted = Vec::new();
+        let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient.clone()) as Box<dyn age::Recipient + Send>])
+            .expect("recipient is valid");
+        {
+            let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
+            writer.write_all(plaintext.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let manifest = format!(
+            r#"
+api_version: v1
+name: encrypted-app
+version: 1.0.0
+app:
+  type: image
+  image: hello-world:latest
+placement:
+  port: 8080
+permissions:
+  read: [admin]
+schema:
+  secrets:
+    API_KEY:
+      description: API key
+      required: true
+      file: secrets/api_key.age
+"#
+        );
+
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let options: FileOptions<()> = FileOptions::default();
+            zip.start_file("amoeba.yaml", options).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            zip.start_file("secrets/api_key.age", options).unwrap();
+            zip.write_all(&encrypted).unwrap();
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn decrypts_age_encrypted_secret_file() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let package = package_zip_with_encrypted_secret("super-secret-key", &recipient);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::with_identity(&catalog_path, Some(identity));
+
+        manager
+            .install(&package, InstallValues::default())
+            .await
+            .unwrap();
+
+        let secret_file = temp_dir.path().join("secrets/encrypted-app/API_KEY");
+        assert_eq!(fs::read_to_string(secret_file).unwrap(), "super-secret-key");
+    }
+
+    #[tokio::test]
+    async fn user_provided_secret_overrides_encrypted_file() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let package = package_zip_with_encrypted_secret("from-file", &recipient);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::with_identity(&catalog_path, Some(identity));
+
+        let values = InstallValues {
+            secrets: HashMap::from([("API_KEY".to_string(), "from-user".to_string())]),
+            ..Default::default()
+        };
+        manager.install(&package, values).await.unwrap();
+
+        let secret_file = temp_dir.path().join("secrets/encrypted-app/API_KEY");
+        assert_eq!(fs::read_to_string(secret_file).unwrap(), "from-user");
     }
 }

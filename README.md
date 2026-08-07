@@ -706,3 +706,83 @@ Revocation is stored in memory only and is lost when the process restarts. After
 
 - **CLI**: local/break-glass only. Whoever can shell into the host and write `/etc/amoeba/users.json` can run it — there's no additional app-level auth on top, so restrict host/SSH access accordingly.
 - **API**: the ongoing, day-to-day path. Every action is tied to a real `sub` in an admin's JWT, giving you an audit trail the CLI doesn't. Consider binding `/admin/*` to an internal-only network or loopback port in front-line deployments, as defense in depth beyond the role check.
+
+---
+
+## 7. Amoeba App Packages
+
+Amoeba supports a self-contained app package format so any open-source project can ship a deployable bundle. A package is a zip file containing an `amoeba.yaml` manifest and a standard `compose.yaml` (or image reference). Install and uninstall are token-gated admin API calls; Amoeba hot-reloads `services.json` without a restart.
+
+See `examples/app-packages/hello-world/` for a working example.
+
+### 7.1 Package structure
+
+```text
+hello-world.amoeba.zip
+├── amoeba.yaml      # metadata, routing, permissions, form schema
+└── compose.yaml     # standard Docker Compose file
+```
+
+### 7.2 Install and uninstall via curl
+
+```bash
+# Install
+curl -X POST http://localhost:8080/admin/apps \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -F "package=@hello-world.amoeba.zip" \
+  -F 'values={"env":{"GREETING":"Hello!"}};type=application/json'
+
+# List installed apps
+curl http://localhost:8080/admin/apps \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
+# Uninstall
+curl -X DELETE http://localhost:8080/admin/apps/hello-world \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+### 7.3 Encrypted secrets with age
+
+Packages can include age-encrypted secret files. The target Amoeba instance decrypts them at install time using `AMOEBA_AGE_SECRET_KEY`.
+
+#### Install age-keygen
+
+`age-keygen` is shipped with the `age` CLI tool.
+
+- **macOS**: `brew install age`
+- **Debian/Ubuntu**: `sudo apt install age`
+- **Fedora**: `sudo dnf install age`
+- **Arch**: `sudo pacman -S age`
+- **Pre-built binaries**: [github.com/FiloSottile/age/releases](https://github.com/FiloSottile/age/releases)
+- **Go**: `go install filippo.io/age/cmd/age-keygen@latest`
+- **Rust alternative**: `cargo install rage` (uses `rage-keygen` instead of `age-keygen`)
+
+#### Generate and configure the age key
+
+On the Amoeba server:
+
+```bash
+age-keygen -o amoeba.age.key
+export AMOEBA_AGE_SECRET_KEY=$(grep AGE-SECRET-KEY amoeba.age.key)
+```
+
+#### Declare and encrypt a package secret
+
+In `amoeba.yaml`:
+
+```yaml
+schema:
+  secrets:
+    API_KEY:
+      description: API key
+      required: true
+      file: secrets/api_key.age
+```
+
+Encrypt the secret to the server's public key:
+
+```bash
+age -r age1... -o secrets/api_key.age < api_key.txt
+```
+
+Include `secrets/api_key.age` in the zip. Amoeba decrypts it at install time and writes the plaintext to `/etc/amoeba/secrets/<app>/API_KEY`. User-provided secret values in the install payload still take precedence over encrypted files.

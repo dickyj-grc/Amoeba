@@ -95,6 +95,9 @@ pub struct EnvField {
 }
 
 /// A sensitive value that must be written to Amoeba's secrets directory.
+/// The value can be supplied at install time via the `values` payload, or
+/// pre-encrypted as an age file inside the package and decrypted by Amoeba
+/// using a configured age identity.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct SecretField {
     #[serde(default)]
@@ -103,6 +106,11 @@ pub struct SecretField {
     pub required: bool,
     #[serde(default)]
     pub validation_pattern: Option<String>,
+    /// Path inside the package to an age-encrypted file containing the secret.
+    /// When present, the file is decrypted at install time and the plaintext
+    /// is written to Amoeba's secrets directory.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 fn default_string() -> String {
