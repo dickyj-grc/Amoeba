@@ -805,7 +805,12 @@ A Python orchestrator spins up a DigitalOcean droplet, installs Caddy and Amoeba
 
 ### 8.2 Files
 
-- `scripts/e2e-do.py` — orchestrates the droplet lifecycle and tests
+- `scripts/e2e-do.py` — thin wrapper that invokes pytest
+- `scripts/e2e/` — pytest test suite and shared fixtures
+  - `conftest.py` — droplet provisioning, login tokens, and helpers
+  - `do_client.py` — DigitalOcean API client
+  - `ssh_client.py` — paramiko wrapper
+  - `test_admin_apps.py`, `test_rbac.py`, `test_errors.py`, `test_scale_to_zero.py` — test cases
 - `scripts/e2e-cloud-init.sh` — cloud-init user-data that provisions the droplet
 - `.github/workflows/nightly-e2e.yml` — GitHub Actions schedule
 
@@ -817,11 +822,17 @@ export DO_SSH_PRIVATE_KEY="/path/to/id_ed25519"
 export DO_SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC..."
 export AMOEBA_LOCAL_JWT_SECRET="..."
 
-python3 -m pip install requests paramiko
+python3 -m venv .venv-e2e
+source .venv-e2e/bin/activate
+pip install -r scripts/requirements-e2e.txt
 python scripts/e2e-do.py
 ```
 
-Add `--keep` to leave the droplet alive for debugging.
+Add `--keep` to leave the droplet alive for debugging. You can also run pytest directly:
+
+```bash
+pytest scripts/e2e/ -v
+```
 
 ### 8.4 What the test verifies
 

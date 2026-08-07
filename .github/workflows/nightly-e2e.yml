@@ -43,4 +43,12 @@ jobs:
           DO_SSH_PUBLIC_KEY: ${{ secrets.DO_SSH_PUBLIC_KEY }}
           AMOEBA_LOCAL_JWT_SECRET: ${{ secrets.AMOEBA_LOCAL_JWT_SECRET }}
           AMOEBA_AGE_SECRET_KEY: ${{ secrets.AMOEBA_AGE_SECRET_KEY }}
-        run: python scripts/e2e-do.py
+        run: python scripts/e2e-do.py --html=report.html --self-contained-html
+
+      - name: Upload e2e report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: report.html
+          retention-days: 7
