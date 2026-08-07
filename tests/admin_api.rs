@@ -8,13 +8,13 @@ use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::proxy::proxy_handler;
 use amoeba::state::AppState;
 use axum::{
+    Router,
     body::Body,
-    http::{header::AUTHORIZATION, Request, StatusCode},
+    http::{Request, StatusCode, header::AUTHORIZATION},
     middleware,
     routing::{any, post},
-    Router,
 };
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt;
@@ -79,7 +79,12 @@ fn build_app(users_file: &str) -> Router {
         .with_state(state)
 }
 
-fn json_request(method: &str, uri: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+fn json_request(
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: serde_json::Value,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -151,11 +156,17 @@ async fn admin_can_create_a_user() {
 async fn creating_a_duplicate_user_returns_conflict() {
     let path = temp_users_file("duplicate");
     let token = token_with_roles(&["admin"]);
-    let payload = json!({"username": "dupe", "password": "hunter2", "roles": ["viewer"], "org_id": "org1"});
+    let payload =
+        json!({"username": "dupe", "password": "hunter2", "roles": ["viewer"], "org_id": "org1"});
 
     let app = build_app(&path);
     let first = app
-        .oneshot(json_request("POST", "/admin/users", Some(&token), payload.clone()))
+        .oneshot(json_request(
+            "POST",
+            "/admin/users",
+            Some(&token),
+            payload.clone(),
+        ))
         .await
         .unwrap();
     assert_eq!(first.status(), StatusCode::CREATED);
@@ -178,7 +189,12 @@ async fn admin_can_update_a_users_roles_and_password() {
     // Seed a user directly via the store so this test isolates the update path.
     let mut store = UserStore::default();
     store
-        .add_user("dicky", "old-password", vec!["viewer".into()], "org_hq".into())
+        .add_user(
+            "dicky",
+            "old-password",
+            vec!["viewer".into()],
+            "org_hq".into(),
+        )
         .unwrap();
     store.save(&path).unwrap();
     let old_hash = UserStore::load(&path)

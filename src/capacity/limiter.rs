@@ -37,8 +37,16 @@ pub fn sum_resource_usage<'a>(specs: impl Iterator<Item = &'a ResourceSpec>) -> 
 mod tests {
     use super::*;
 
-    fn spec(memory_mb: Option<u64>, cpu_cores: Option<u64>, gpu_vram_mb: Option<u64>) -> ResourceSpec {
-        ResourceSpec { memory_mb, cpu_cores, gpu_vram_mb }
+    fn spec(
+        memory_mb: Option<u64>,
+        cpu_cores: Option<u64>,
+        gpu_vram_mb: Option<u64>,
+    ) -> ResourceSpec {
+        ResourceSpec {
+            memory_mb,
+            cpu_cores,
+            gpu_vram_mb,
+        }
     }
 
     #[test]
@@ -101,7 +109,10 @@ mod tests {
 
     #[test]
     fn sum_resource_usage_adds_across_multiple_specs() {
-        let specs = vec![spec(Some(1000), Some(2), None), spec(Some(2000), Some(4), Some(500))];
+        let specs = vec![
+            spec(Some(1000), Some(2), None),
+            spec(Some(2000), Some(4), Some(500)),
+        ];
         let total = sum_resource_usage(specs.iter());
         assert_eq!(total.memory_mb, Some(3000));
         assert_eq!(total.cpu_cores, Some(6));

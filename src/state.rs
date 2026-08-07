@@ -1,7 +1,8 @@
 //! Shared application state: config catalog, runtime tracking, auth engine.
 
-use crate::auth::revocation::InMemoryRevocationStore;
+use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
 use crate::auth::JwtEngine;
+use crate::auth::revocation::InMemoryRevocationStore;
 use crate::config::schema::ServiceCatalog;
 use crate::config::watcher::{load_catalog, spawn_file_watcher};
 use crate::lifecycle::container::ServiceRuntimeState;
@@ -21,6 +22,7 @@ const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct AppState {
     pub catalog: ArcSwap<ServiceCatalog>,
     pub runtime_states: ArcSwap<HashMap<String, Arc<ServiceRuntimeState>>>,
+    pub app_states: ArcSwap<HashMap<String, Arc<AppLifecycleState>>>,
     pub drivers: ArcSwap<HashMap<String, Arc<ServiceDriver>>>,
     pub jwt_engine: Arc<JwtEngine>,
     pub revocation_store: Option<InMemoryRevocationStore>,
@@ -49,6 +51,12 @@ impl AppState {
             .map(|key| (key.clone(), Arc::new(ServiceRuntimeState::new())))
             .collect();
 
+        let initial_app_states = initial_catalog
+            .services
+            .keys()
+            .map(|key| (key.clone(), Arc::new(AppLifecycleState::installed())))
+            .collect();
+
         // Connecting is best-effort: a missing/unreachable Docker socket must not
         // stop the whole gateway from starting (e.g. proxying to already-running,
         // externally-managed backends still works). Container-workload drivers
@@ -72,6 +80,7 @@ impl AppState {
         let state = Arc::new(Self {
             catalog: ArcSwap::from_pointee(initial_catalog),
             runtime_states: ArcSwap::from_pointee(initial_runtimes),
+            app_states: ArcSwap::from_pointee(initial_app_states),
             drivers: ArcSwap::from_pointee(initial_drivers),
             jwt_engine,
             revocation_store,
@@ -82,6 +91,7 @@ impl AppState {
 
         Self::watch_config(state.clone(), config_path.to_string(), config_dir, docker);
         spawn_reaper_thread(state.clone());
+        Self::spawn_initial_readiness_probes(state.clone());
 
         state
     }
@@ -90,18 +100,52 @@ impl AppState {
         let owner = Arc::downgrade(&state);
         spawn_file_watcher(path, owner, move |new_catalog| {
             let mut new_runtimes = (*state.runtime_states.load().clone()).clone();
+            let mut new_app_states = (*state.app_states.load().clone()).clone();
             for key in new_catalog.services.keys() {
                 new_runtimes
                     .entry(key.clone())
                     .or_insert_with(|| Arc::new(ServiceRuntimeState::new()));
+                new_app_states
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(AppLifecycleState::installed()));
             }
 
-            let new_drivers = driver::build_all(&new_catalog, &config_dir, docker.clone());
+            let _new_drivers = driver::build_all(&new_catalog, &config_dir, docker.clone());
 
             state.catalog.store(Arc::new(new_catalog));
             state.runtime_states.store(Arc::new(new_runtimes));
-            state.drivers.store(Arc::new(new_drivers));
+            state.app_states.store(Arc::new(new_app_states));
         });
+    }
+}
+
+impl AppState {
+    /// Read the lifecycle state for a service, if one exists.
+    pub fn app_state(&self, name: &str) -> Option<Arc<AppLifecycleState>> {
+        self.app_states.load().get(name).cloned()
+    }
+
+    /// Set or replace the lifecycle state for a service.
+    pub fn set_app_state(&self, name: &str, app_state: Arc<AppLifecycleState>) {
+        let mut new_states = (*self.app_states.load().clone()).clone();
+        new_states.insert(name.to_string(), app_state);
+        self.app_states.store(Arc::new(new_states));
+    }
+
+    /// Return serializable snapshots of all tracked app states.
+    pub fn app_state_snapshots(&self) -> HashMap<String, AppLifecycleSnapshot> {
+        self.app_states
+            .load()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.snapshot()))
+            .collect()
+    }
+
+    fn spawn_initial_readiness_probes(state: Arc<Self>) {
+        let names: Vec<String> = state.app_states.load().keys().cloned().collect();
+        for name in names {
+            crate::apps::manager::spawn_readiness_probe(state.clone(), name);
+        }
     }
 }
 

@@ -6,14 +6,14 @@ use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::routing::apps_admin::{install_app, list_apps, uninstall_app};
 use amoeba::state::AppState;
 use axum::{
+    Router,
     body::Body,
     extract::DefaultBodyLimit,
-    http::{header::AUTHORIZATION, Request, StatusCode},
+    http::{Request, StatusCode, header::AUTHORIZATION},
     middleware,
     routing::{delete, post},
-    Router,
 };
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
 use std::io::Write;
 use tower::ServiceExt;
@@ -114,7 +114,9 @@ fn multipart_install_request(token: Option<&str>, package: &[u8], values: &str) 
 
     body.extend_from_slice(format!("--{boundary}").as_bytes());
     body.extend_from_slice(crlf);
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"package\"; filename=\"test-app.amoeba.zip\"");
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"package\"; filename=\"test-app.amoeba.zip\"",
+    );
     body.extend_from_slice(crlf);
     body.extend_from_slice(b"Content-Type: application/zip");
     body.extend_from_slice(crlf);
@@ -135,13 +137,10 @@ fn multipart_install_request(token: Option<&str>, package: &[u8], values: &str) 
     body.extend_from_slice(format!("--{boundary}--").as_bytes());
     body.extend_from_slice(crlf);
 
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri("/admin/apps")
-        .header(
-            "content-type",
-            format!("multipart/form-data; boundary={boundary}"),
-        );
+    let mut builder = Request::builder().method("POST").uri("/admin/apps").header(
+        "content-type",
+        format!("multipart/form-data; boundary={boundary}"),
+    );
     if let Some(t) = token {
         builder = builder.header(AUTHORIZATION, format!("Bearer {t}"));
     }

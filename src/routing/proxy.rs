@@ -1,23 +1,24 @@
 //! Extracts service_name/subpath from the incoming path and dispatches upstream.
 
 use super::operation::{classify_operation, has_permission};
-use crate::auth::middleware::verify_request_token;
+use crate::apps::state::AppLifecycleState;
 use crate::auth::Claims;
+use crate::auth::middleware::verify_request_token;
 use crate::capacity::limiter::{fits_within_budget, sum_resource_usage};
 use crate::config::schema::ServiceConfig;
-use crate::lifecycle::container::{is_occupying_capacity, now_unix, ServiceRuntimeState};
+use crate::lifecycle::container::{
+    ServiceRuntimeState, is_occupying_capacity, now_unix, wait_until_ready,
+};
 use crate::metering::telemetry::emit_usage_telemetry;
 use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Path, Request, State},
-    http::{header::AUTHORIZATION, HeaderName, HeaderValue, StatusCode},
+    http::{HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION},
     response::Response,
 };
-use std::sync::{atomic::Ordering, Arc};
-use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
-use tokio::time::timeout;
+use std::sync::{Arc, atomic::Ordering};
+use std::time::Instant;
 use tracing::{error, info};
 
 /// Builds the upstream URL for a resolved service and request subpath.
@@ -72,31 +73,6 @@ pub fn apply_upstream_auth(
     outbound_req
 }
 
-/// Bounded poll-connect against the upstream host:port, used as the
-/// dependency-free readiness check after a driver reports a service started
-/// (works uniformly across the container/compose-file/inline-stack_spec
-/// scenarios, since all of them expose a plain TCP port). The overall budget
-/// is configurable via `AMOEBA_READINESS_TIMEOUT_MS` (default 30s) so tests
-/// exercising an intentionally-unreachable backend aren't stuck waiting.
-async fn wait_until_ready(host: &str, port: u16) -> bool {
-    let budget_ms: u64 = std::env::var("AMOEBA_READINESS_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30_000);
-    let deadline = Instant::now() + Duration::from_millis(budget_ms);
-    let per_attempt = Duration::from_millis(250);
-
-    loop {
-        if let Ok(Ok(_)) = timeout(per_attempt, TcpStream::connect((host, port))).await {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     Path((service_name, subpath)): Path<(String, String)>,
@@ -118,6 +94,25 @@ pub async fn proxy_handler(
             .ok_or(StatusCode::NOT_FOUND)?
     };
     let service_cfg = &service_cfg;
+
+    // 1.5. Fail fast if the app is known but not yet ready. This prevents the
+    // first request from blocking on a slow or failing image pull.
+    if let Some(app_state) = state.app_state(&service_name) {
+        if !app_state.is_ready() {
+            let reason = if app_state.is_error() {
+                "app-error"
+            } else {
+                "app-not-ready"
+            };
+            return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, reason));
+        }
+    } else {
+        // Services that pre-date the lifecycle state map are treated as ready
+        // so existing config-file services keep working without an explicit
+        // install step. They will get a lifecycle entry on the next catalog
+        // reload and be probed then.
+        state.set_app_state(&service_name, Arc::new(AppLifecycleState::ready()));
+    }
 
     // 2. Authenticate, unless this service opted out via "public": true
     let claims: Option<Claims> = if service_cfg.public {
@@ -187,7 +182,10 @@ pub async fn proxy_handler(
             let runtimes = state.runtime_states.load();
 
             match service_cfg.machine_name(&catalog).and_then(|machine_name| {
-                catalog.machines.get(machine_name).map(|m| (machine_name, m))
+                catalog
+                    .machines
+                    .get(machine_name)
+                    .map(|m| (machine_name, m))
             }) {
                 Some((machine_name, machine)) => {
                     let want = service_cfg.resource_footprint();
@@ -233,7 +231,10 @@ pub async fn proxy_handler(
             // Roll back the increment above: this request never actually
             // proceeds, so it must not permanently inflate the counter.
             runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
-            return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, "machine-capacity"));
+            return Ok(rejection(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "machine-capacity",
+            ));
         }
 
         let driver = state.drivers.load().get(&service_name).cloned();
@@ -248,16 +249,24 @@ pub async fn proxy_handler(
                 Err(e) => {
                     runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
                     error!(service = %service_name, "failed to start service: {e}");
-                    return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, "driver-start-failed"));
+                    return Ok(rejection(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "driver-start-failed",
+                    ));
                 }
             }
         }
 
-        let host = runtime.resolved_host().unwrap_or_else(|| service_cfg.upstream_host().to_string());
+        let host = runtime
+            .resolved_host()
+            .unwrap_or_else(|| service_cfg.upstream_host().to_string());
         if !wait_until_ready(&host, service_cfg.placement.port).await {
             runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
             error!(service = %service_name, "service did not become ready in time");
-            return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, "driver-not-ready"));
+            return Ok(rejection(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "driver-not-ready",
+            ));
         }
     }
 
@@ -265,7 +274,9 @@ pub async fn proxy_handler(
     // prior cold-boot (this request's or an earlier one, for an
     // already-warm service) resolved a dynamic host; otherwise falls back to
     // the static `placement.ip`/`primary_service` config value.
-    let host = runtime.resolved_host().unwrap_or_else(|| service_cfg.upstream_host().to_string());
+    let host = runtime
+        .resolved_host()
+        .unwrap_or_else(|| service_cfg.upstream_host().to_string());
     let target_url = build_target_url(&host, service_cfg.placement.port, &subpath);
     let mut outbound_req = state.http_client.request(req.method().clone(), &target_url);
 
@@ -288,11 +299,17 @@ pub async fn proxy_handler(
     match response {
         Ok(res) => {
             let status = res.status();
-            let res_bytes = res.bytes().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let res_bytes = res
+                .bytes()
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             // 9. Emit Usage Telemetry Log
             emit_usage_telemetry(
-                claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("anonymous"),
+                claims
+                    .as_ref()
+                    .map(|c| c.sub.as_str())
+                    .unwrap_or("anonymous"),
                 claims.as_ref().and_then(|c| c.org_id.as_deref()),
                 &service_name,
                 operation,
@@ -325,7 +342,11 @@ mod tests {
                 cooldown_seconds: None,
                 machine: None,
             },
-            container: Some(ContainerSpec { image: "img".into(), resources: None, env: HashMap::new() }),
+            container: Some(ContainerSpec {
+                image: "img".into(),
+                resources: None,
+                env: HashMap::new(),
+            }),
             stack_spec: None,
             operation_rules: None,
             permissions: HashMap::new(),
@@ -365,7 +386,10 @@ mod tests {
         let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
         let built = req.build().unwrap();
 
-        assert_eq!(built.headers().get(AUTHORIZATION).unwrap(), "Bearer secret-token");
+        assert_eq!(
+            built.headers().get(AUTHORIZATION).unwrap(),
+            "Bearer secret-token"
+        );
     }
 
     #[test]

@@ -7,11 +7,11 @@ use amoeba::auth::users::UserStore;
 use amoeba::routing::auth::{login, revoke};
 use amoeba::state::AppState;
 use axum::{
+    Router,
     body::Body,
-    http::{header::AUTHORIZATION, Request, StatusCode},
+    http::{Request, StatusCode, header::AUTHORIZATION},
     middleware,
     routing::post,
-    Router,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -32,7 +32,12 @@ fn temp_users_file(label: &str) -> String {
 fn seed_user(path: &str) {
     let mut store = UserStore::default();
     store
-        .add_user("dicky", "hunter2", vec!["admin".into(), "analyst".into()], "org_hq".into())
+        .add_user(
+            "dicky",
+            "hunter2",
+            vec!["admin".into(), "analyst".into()],
+            "org_hq".into(),
+        )
         .unwrap();
     store.save(path).unwrap();
 }
@@ -64,7 +69,12 @@ fn build_app(users_file: &str) -> Router {
         .with_state(state)
 }
 
-fn json_request(method: &str, uri: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+fn json_request(
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: serde_json::Value,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -91,7 +101,9 @@ async fn login_with_valid_credentials_returns_token() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(payload["token"].as_str().unwrap().starts_with("eyJ"));
     assert!(payload["expires_at"].as_u64().unwrap() > 0);
@@ -156,7 +168,9 @@ async fn admin_can_revoke_a_token() {
         .await
         .unwrap();
     assert_eq!(login_res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(login_res.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(login_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let login_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let token = login_payload["token"].as_str().unwrap().to_string();
 
@@ -199,7 +213,9 @@ async fn non_admin_cannot_revoke_a_token() {
         ))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(login_res.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(login_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let login_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let token = login_payload["token"].as_str().unwrap().to_string();
 

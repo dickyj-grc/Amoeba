@@ -183,7 +183,10 @@ schema:
         assert_eq!(manifest.name, "pdf-inspector");
         assert!(manifest.is_compose());
         assert_eq!(manifest.placement.port, 8080);
-        assert_eq!(manifest.permissions.get("read").unwrap(), &["admin", "analyst"]);
+        assert_eq!(
+            manifest.permissions.get("read").unwrap(),
+            &["admin", "analyst"]
+        );
         assert!(manifest.schema.secrets.contains_key("API_KEY"));
     }
 

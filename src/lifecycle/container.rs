@@ -1,8 +1,10 @@
 //! Container start/stop, active connection counting, cooldown timers.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 /// Runtime tracker for active connections and activity timestamps.
 pub struct ServiceRuntimeState {
@@ -53,7 +55,35 @@ impl Default for ServiceRuntimeState {
 }
 
 pub fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Bounded poll-connect against the upstream host:port, used as the
+/// dependency-free readiness check after a driver reports a service started
+/// (works uniformly across the container/compose-file/inline-stack_spec
+/// scenarios, since all of them expose a plain TCP port). The overall budget
+/// is configurable via `AMOEBA_READINESS_TIMEOUT_MS` (default 30s) so tests
+/// exercising an intentionally-unreachable backend aren't stuck waiting.
+pub async fn wait_until_ready(host: &str, port: u16) -> bool {
+    let budget_ms: u64 = std::env::var("AMOEBA_READINESS_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000);
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    let per_attempt = Duration::from_millis(250);
+
+    loop {
+        if let Ok(Ok(_)) = timeout(per_attempt, TcpStream::connect((host, port))).await {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// Decides whether an idle service should be scaled down to zero.

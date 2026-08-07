@@ -5,7 +5,7 @@ use super::{Claims, JwtEngine};
 use crate::state::AppState;
 use axum::{
     extract::{Request, State},
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     middleware::Next,
     response::Response,
 };

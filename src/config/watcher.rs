@@ -53,7 +53,9 @@ fn validate_machine_references(catalog: &ServiceCatalog) -> Result<(), String> {
         match &svc.placement.machine {
             Some(machine) => {
                 if !catalog.machines.contains_key(machine) {
-                    return Err(format!("service '{name}' references undefined machine '{machine}'"));
+                    return Err(format!(
+                        "service '{name}' references undefined machine '{machine}'"
+                    ));
                 }
             }
             None => {
@@ -78,9 +80,15 @@ fn validate_workload_exclusivity(catalog: &ServiceCatalog) -> Result<(), String>
         match (&svc.container, &svc.stack_spec) {
             (Some(_), None) | (None, Some(_)) => {}
             (Some(_), Some(_)) => {
-                return Err(format!("service '{name}' must set exactly one of container/stack_spec, not both"))
+                return Err(format!(
+                    "service '{name}' must set exactly one of container/stack_spec, not both"
+                ));
             }
-            (None, None) => return Err(format!("service '{name}' must set exactly one of container/stack_spec")),
+            (None, None) => {
+                return Err(format!(
+                    "service '{name}' must set exactly one of container/stack_spec"
+                ));
+            }
         }
     }
     Ok(())
@@ -90,16 +98,20 @@ fn validate_workload_exclusivity(catalog: &ServiceCatalog) -> Result<(), String>
 /// pre-existing file) or `services` (inline, Amoeba-generated) is set.
 fn validate_stack_spec_mode(catalog: &ServiceCatalog) -> Result<(), String> {
     for (name, svc) in &catalog.services {
-        let Some(stack) = &svc.stack_spec else { continue };
+        let Some(stack) = &svc.stack_spec else {
+            continue;
+        };
         match (&stack.compose_file, &stack.services) {
             (Some(_), None) | (None, Some(_)) => {}
             (Some(_), Some(_)) => {
                 return Err(format!(
                     "service '{name}' stack_spec must set exactly one of compose_file/services, not both"
-                ))
+                ));
             }
             (None, None) => {
-                return Err(format!("service '{name}' stack_spec must set exactly one of compose_file/services"))
+                return Err(format!(
+                    "service '{name}' stack_spec must set exactly one of compose_file/services"
+                ));
             }
         }
     }
@@ -109,7 +121,10 @@ fn validate_stack_spec_mode(catalog: &ServiceCatalog) -> Result<(), String> {
 /// Whether `svc`'s machine lists `"apple-container"` among its `drivers`.
 /// Assumes `validate_machine_references` has already run (so `catalog.machines`
 /// lookups here are meaningful, not just defensively `None`-safe).
-fn service_uses_apple_container(svc: &super::schema::ServiceConfig, catalog: &ServiceCatalog) -> bool {
+fn service_uses_apple_container(
+    svc: &super::schema::ServiceConfig,
+    catalog: &ServiceCatalog,
+) -> bool {
     svc.machine_name(catalog)
         .and_then(|m| catalog.machines.get(m))
         .is_some_and(|m| m.drivers.iter().any(|d| d == "apple-container"))
@@ -136,7 +151,9 @@ fn validate_placement_host(catalog: &ServiceCatalog) -> Result<(), String> {
                     ));
                 }
             } else if svc.placement.ip.is_none() {
-                return Err(format!("service '{name}' has a container workload but no placement.ip"));
+                return Err(format!(
+                    "service '{name}' has a container workload but no placement.ip"
+                ));
             }
             if svc.placement.primary_service.is_some() {
                 return Err(format!(
@@ -188,7 +205,11 @@ fn validate_placement_type(catalog: &ServiceCatalog) -> Result<(), String> {
 /// drivers today.
 fn validate_driver_supported(catalog: &ServiceCatalog) -> Result<(), String> {
     for (name, machine) in &catalog.machines {
-        if !machine.drivers.iter().any(|d| d == "docker" || d == "apple-container") {
+        if !machine
+            .drivers
+            .iter()
+            .any(|d| d == "docker" || d == "apple-container")
+        {
             return Err(format!(
                 "machine '{name}' has no supported driver (only \"docker\"/\"apple-container\" are \
                  supported today): {:?}",
@@ -248,7 +269,10 @@ where
 
         loop {
             match rx.recv_timeout(LIVENESS_POLL_INTERVAL) {
-                Ok(Ok(Event { kind: EventKind::Modify(_), .. })) => {
+                Ok(Ok(Event {
+                    kind: EventKind::Modify(_),
+                    ..
+                })) => {
                     if let Ok(new_catalog) = load_catalog(&path) {
                         info!("🔄 Reloading service catalog from disk (lock-free)");
                         on_reload(new_catalog);
@@ -272,7 +296,10 @@ mod tests {
 
     fn write_temp_catalog(label: &str, content: &str) -> String {
         let path = std::env::temp_dir()
-            .join(format!("amoeba-watcher-test-{}-{label}.json", std::process::id()))
+            .join(format!(
+                "amoeba-watcher-test-{}-{label}.json",
+                std::process::id()
+            ))
             .to_str()
             .unwrap()
             .to_string();
@@ -280,10 +307,13 @@ mod tests {
         path
     }
 
-    const MACHINES_LOCAL_ONLY: &str = r#""machines": { "local": { "type": "vm", "drivers": ["docker"], "resources": {} } }"#;
+    const MACHINES_LOCAL_ONLY: &str =
+        r#""machines": { "local": { "type": "vm", "drivers": ["docker"], "resources": {} } }"#;
 
     fn container_service(name: &str, ip: &str, machine: Option<&str>) -> String {
-        let machine_field = machine.map(|m| format!(r#","machine": "{m}""#)).unwrap_or_default();
+        let machine_field = machine
+            .map(|m| format!(r#","machine": "{m}""#))
+            .unwrap_or_default();
         format!(
             r#"{{
                 "version": 1,
@@ -316,14 +346,20 @@ mod tests {
 
     #[test]
     fn load_catalog_errors_on_undefined_machine_reference() {
-        let path = write_temp_catalog("undefined-machine", &container_service("svc", "svc", Some("ghost-box")));
+        let path = write_temp_catalog(
+            "undefined-machine",
+            &container_service("svc", "svc", Some("ghost-box")),
+        );
         assert!(load_catalog(&path).is_err());
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn load_catalog_succeeds_when_machine_reference_is_defined() {
-        let path = write_temp_catalog("defined-machine", &container_service("svc", "svc", Some("local")));
+        let path = write_temp_catalog(
+            "defined-machine",
+            &container_service("svc", "svc", Some("local")),
+        );
         assert!(load_catalog(&path).is_ok());
         std::fs::remove_file(&path).ok();
     }
@@ -488,7 +524,13 @@ mod tests {
         );
         let path = write_temp_catalog("project-name-default", &json);
         let catalog = load_catalog(&path).unwrap();
-        let stack = catalog.services.get("brms").unwrap().stack_spec.as_ref().unwrap();
+        let stack = catalog
+            .services
+            .get("brms")
+            .unwrap()
+            .stack_spec
+            .as_ref()
+            .unwrap();
         assert_eq!(stack.project_name.as_deref(), Some("brms"));
         std::fs::remove_file(&path).ok();
     }

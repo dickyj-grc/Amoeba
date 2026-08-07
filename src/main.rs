@@ -2,14 +2,13 @@ use amoeba::auth::jwt::local_engine_with_revocation;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::auth::revocation::InMemoryRevocationStore;
 use amoeba::routing::admin::{create_user, delete_user, update_user};
-use amoeba::routing::apps_admin::{install_app, list_apps, uninstall_app};
+use amoeba::routing::apps_admin::{get_app_status, install_app, list_apps, uninstall_app};
 use amoeba::routing::auth::{login, revoke};
 use amoeba::routing::proxy::proxy_handler;
 use amoeba::state::AppState;
 use axum::{
-    middleware,
+    Router, middleware,
     routing::{any, post},
-    Router,
 };
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -28,7 +27,10 @@ async fn main() {
         "super_secret_local_key_change_in_production".to_string()
     });
     let revocation_store = InMemoryRevocationStore::new();
-    let jwt_engine = Arc::new(local_engine_with_revocation(jwt_secret, revocation_store.clone()));
+    let jwt_engine = Arc::new(local_engine_with_revocation(
+        jwt_secret,
+        revocation_store.clone(),
+    ));
 
     // Initialize App State & Dynamic File Watchers
     let app_state = AppState::new(
@@ -44,9 +46,15 @@ async fn main() {
     // be attached before the role check can read them.
     let admin_routes = Router::new()
         .route("/users", post(create_user))
-        .route("/users/:username", axum::routing::patch(update_user).delete(delete_user))
+        .route(
+            "/users/:username",
+            axum::routing::patch(update_user).delete(delete_user),
+        )
         .route("/apps", post(install_app).get(list_apps))
-        .route("/apps/:name", axum::routing::delete(uninstall_app))
+        .route(
+            "/apps/:name",
+            axum::routing::get(get_app_status).delete(uninstall_app),
+        )
         .route_layer(middleware::from_fn(require_admin_role))
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -55,12 +63,13 @@ async fn main() {
 
     // Auth routes: login is public; revoke requires a valid JWT (admin role checked
     // inside the handler after the middleware attaches Claims).
-    let revoke_route = Router::new()
-        .route("/revoke", post(revoke))
-        .route_layer(middleware::from_fn_with_state(
-            app_state.clone(),
-            unified_auth_middleware,
-        ));
+    let revoke_route =
+        Router::new()
+            .route("/revoke", post(revoke))
+            .route_layer(middleware::from_fn_with_state(
+                app_state.clone(),
+                unified_auth_middleware,
+            ));
 
     let auth_routes = Router::new()
         .route("/login", post(login))

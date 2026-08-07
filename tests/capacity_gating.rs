@@ -19,16 +19,17 @@
 //! left to verify) and reaches the real (unreachable) backend, which is where
 //! a plain `502` still shows up.
 
+use amoeba::apps::state::AppLifecycleState;
 use amoeba::auth::jwt::local_engine;
 use amoeba::routing::proxy::proxy_handler;
 use amoeba::state::AppState;
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
     routing::any,
-    Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const REJECTION_REASON_HEADER: &str = "x-amoeba-rejection-reason";
@@ -55,17 +56,36 @@ fn build_app(services_file: &str) -> Router {
     let jwt_engine = std::sync::Arc::new(local_engine("test-capacity-gating-secret"));
     let state = AppState::new(services_file, "/nonexistent/users.json", jwt_engine, None);
 
+    // These tests exercise capacity gating, not the install-time readiness
+    // probe. Mark every catalog service as ready so requests reach the gate.
+    for name in state
+        .catalog
+        .load()
+        .services
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        state.set_app_state(&name, std::sync::Arc::new(AppLifecycleState::ready()));
+    }
+
     Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))
         .with_state(state)
 }
 
 fn get(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn rejection_reason(res: &axum::response::Response) -> Option<&str> {
-    res.headers().get(REJECTION_REASON_HEADER).and_then(|v| v.to_str().ok())
+    res.headers()
+        .get(REJECTION_REASON_HEADER)
+        .and_then(|v| v.to_str().ok())
 }
 
 #[tokio::test]
@@ -310,7 +330,8 @@ async fn catalog_with_undefined_machine_reference_fails_to_load_and_service_retu
 }
 
 #[tokio::test]
-async fn service_with_machine_but_no_resources_is_always_admitted_and_does_not_shrink_sibling_budget() {
+async fn service_with_machine_but_no_resources_is_always_admitted_and_does_not_shrink_sibling_budget()
+ {
     let path = temp_services_file("no-resources-on-machine");
     write_catalog(
         &path,

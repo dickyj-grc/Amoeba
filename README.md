@@ -736,6 +736,10 @@ curl -X POST http://localhost:8080/admin/apps \
 curl http://localhost:8080/admin/apps \
   -H "Authorization: Bearer $ADMIN_JWT"
 
+# Check app readiness state (installed / pulling / ready / error)
+curl http://localhost:8080/admin/apps/hello-world \
+  -H "Authorization: Bearer $ADMIN_JWT"
+
 # Uninstall
 curl -X DELETE http://localhost:8080/admin/apps/hello-world \
   -H "Authorization: Bearer $ADMIN_JWT"
@@ -786,6 +790,42 @@ age -r age1... -o secrets/api_key.age < api_key.txt
 ```
 
 Include `secrets/api_key.age` in the zip. Amoeba decrypts it at install time and writes the plaintext to `/etc/amoeba/secrets/<app>/API_KEY`. User-provided secret values in the install payload still take precedence over encrypted files.
+
+### 7.4 App lifecycle state
+
+After install Amoeba does not immediately return the app to callers. Instead it runs a background readiness probe:
+
+```
+installed -> pulling -> ready
+                     -> error
+```
+
+- `installed`: catalog updated, probe not started yet.
+- `pulling`: `docker pull` or `docker compose pull` is running.
+- `ready`: image is present and the app's TCP port responds.
+- `error`: pull or readiness probe failed; `message` contains the error.
+
+Check state at any time:
+
+```bash
+curl http://localhost:8080/admin/apps/hello-world \
+  -H "Authorization: Bearer $ADMIN_JWT"
+```
+
+Response:
+
+```json
+{
+  "name": "hello-world",
+  "state": {
+    "state": "ready",
+    "message": null,
+    "updated_at": 1712345678
+  }
+}
+```
+
+Until the app is `ready`, the proxy rejects requests with `503 Service Unavailable` and `x-amoeba-rejection-reason: app-not-ready` (or `app-error`). This prevents the first API call from blocking on a slow registry download or a broken image, and gives the operator a clear signal when something is wrong.
 
 ---
 
@@ -840,7 +880,8 @@ pytest scripts/e2e/ -v
 2. Amoeba + Caddy come up via Docker Compose.
 3. Admin login returns a JWT.
 4. `POST /admin/apps` installs the `hello-world` app package.
-5. `GET /admin/apps` lists the installed app.
+5. `GET /admin/apps/hello-world` polls until the app reaches the `ready` state.
+6. `GET /admin/apps` lists the installed app.
 6. Admin creates `analyst` and `viewer` users with different roles.
 7. Role-based access control:
    - `analyst` can read and add to `hello-world`.

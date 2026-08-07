@@ -1,8 +1,8 @@
 //! Public authentication handlers: login (username/password -> JWT) and token
 //! revocation (admin-only).
 
-use crate::auth::users::UserStore;
 use crate::auth::Claims;
+use crate::auth::users::UserStore;
 use crate::state::AppState;
 use axum::{
     extract::{Json, State},
@@ -40,7 +40,10 @@ pub async fn login(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        let user = store.users.get(&payload.username).ok_or(StatusCode::UNAUTHORIZED)?;
+        let user = store
+            .users
+            .get(&payload.username)
+            .ok_or(StatusCode::UNAUTHORIZED)?;
 
         if !crate::auth::users::verify_password(&payload.password, &user.password_hash) {
             return Err(StatusCode::UNAUTHORIZED);
@@ -60,7 +63,10 @@ pub async fn login(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        Ok(Json(LoginResponse { token, expires_at: exp }))
+        Ok(Json(LoginResponse {
+            token,
+            expires_at: exp,
+        }))
     }
     .await;
 

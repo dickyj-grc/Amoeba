@@ -2,7 +2,7 @@
 
 use super::container::{now_unix, should_scale_to_zero};
 use crate::state::AppState;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::Ordering};
 use tracing::{error, info};
 
 /// Spawns a background loop that checks each service's idle time against its

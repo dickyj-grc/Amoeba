@@ -5,16 +5,22 @@
 //! the new catalog without a process restart.
 
 use super::schema::{AppManifest, AppSpec, InstallValues, ResourceSpec};
+use super::state::LifecycleStatus;
 use crate::config::schema::{
-    ContainerResources, ContainerSpec, MachineConfig, Placement, ResourceQuantities, ServiceCatalog,
-    ServiceConfig, StackSpec,
+    ContainerResources, ContainerSpec, MachineConfig, Placement, ResourceQuantities,
+    ServiceCatalog, ServiceConfig, StackSpec,
 };
+use crate::lifecycle::container::wait_until_ready;
+use crate::state::AppState;
 use serde_json;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -134,8 +140,13 @@ impl AppManager {
         validate_manifest(&manifest)?;
 
         let mut values = values;
-        decrypt_secret_files(&manifest, temp_dir.path(), self.age_identity.as_ref(), &mut values)
-            .await?;
+        decrypt_secret_files(
+            &manifest,
+            temp_dir.path(),
+            self.age_identity.as_ref(),
+            &mut values,
+        )
+        .await?;
         validate_values(&manifest, &values)?;
 
         let app_name = manifest.service_name().to_string();
@@ -197,10 +208,9 @@ impl AppManager {
         let _guard = self.lock.lock().await;
 
         let mut catalog = load_catalog(&self.catalog_path)?;
-        let service = catalog
-            .services
-            .remove(app_name)
-            .ok_or_else(|| AppManagerError::Validation(format!("app '{app_name}' is not installed")))?;
+        let service = catalog.services.remove(app_name).ok_or_else(|| {
+            AppManagerError::Validation(format!("app '{app_name}' is not installed"))
+        })?;
         save_catalog(&self.catalog_path, &catalog)?;
 
         // Best-effort container teardown outside the critical section is fine
@@ -278,22 +288,21 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
 
     if let Some(resources) = &manifest.resources {
         if let Some(memory) = &resources.memory {
-            crate::config::schema::parse_quantity_to_mb(memory)
-                .map_err(|e| AppManagerError::Validation(format!("invalid resources.memory: {e}")))?;
+            crate::config::schema::parse_quantity_to_mb(memory).map_err(|e| {
+                AppManagerError::Validation(format!("invalid resources.memory: {e}"))
+            })?;
         }
         if let Some(gpu_vram) = &resources.gpu_vram {
-            crate::config::schema::parse_quantity_to_mb(gpu_vram)
-                .map_err(|e| AppManagerError::Validation(format!("invalid resources.gpu_vram: {e}")))?;
+            crate::config::schema::parse_quantity_to_mb(gpu_vram).map_err(|e| {
+                AppManagerError::Validation(format!("invalid resources.gpu_vram: {e}"))
+            })?;
         }
     }
 
     Ok(())
 }
 
-fn validate_values(
-    manifest: &AppManifest,
-    values: &InstallValues,
-) -> Result<(), AppManagerError> {
+fn validate_values(manifest: &AppManifest, values: &InstallValues) -> Result<(), AppManagerError> {
     // Ensure required secrets are present.
     for (key, field) in &manifest.schema.secrets {
         if field.required && !values.secrets.contains_key(key) {
@@ -302,8 +311,9 @@ fn validate_values(
             )));
         }
         if let (Some(pattern), Some(value)) = (&field.validation_pattern, values.secrets.get(key)) {
-            let regex = regex_lite::Regex::new(pattern)
-                .map_err(|e| AppManagerError::Validation(format!("invalid regex for {key}: {e}")))?;
+            let regex = regex_lite::Regex::new(pattern).map_err(|e| {
+                AppManagerError::Validation(format!("invalid regex for {key}: {e}"))
+            })?;
             if !regex.is_match(value) {
                 return Err(AppManagerError::Validation(format!(
                     "secret {key} does not match required pattern"
@@ -335,11 +345,7 @@ async fn decrypt_secret_files(
         None => {
             // If no age identity is configured, encrypted secret files cannot be
             // decrypted. This is only an error if the package actually uses them.
-            let any_encrypted = manifest
-                .schema
-                .secrets
-                .values()
-                .any(|f| f.file.is_some());
+            let any_encrypted = manifest.schema.secrets.values().any(|f| f.file.is_some());
             if any_encrypted {
                 return Err(AppManagerError::Decrypt(
                     "package contains age-encrypted secret files but AMOEBA_AGE_SECRET_KEY is not set"
@@ -351,7 +357,9 @@ async fn decrypt_secret_files(
     };
 
     for (key, field) in &manifest.schema.secrets {
-        let Some(file_path) = &field.file else { continue };
+        let Some(file_path) = &field.file else {
+            continue;
+        };
 
         // User-provided values take precedence over encrypted files.
         if values.secrets.contains_key(key) {
@@ -395,7 +403,9 @@ async fn decrypt_age_file(
         age::Decryptor::Recipients(d) => {
             let mut reader = d
                 .decrypt(std::iter::once(identity as &dyn age::Identity))
-                .map_err(|e| AppManagerError::Decrypt(format!("failed to decrypt recipients: {e}")))?;
+                .map_err(|e| {
+                    AppManagerError::Decrypt(format!("failed to decrypt recipients: {e}"))
+                })?;
             reader.read_to_end(&mut plaintext)?;
         }
         age::Decryptor::Passphrase(_) => {
@@ -449,9 +459,11 @@ fn build_service_config(
 ) -> ServiceConfig {
     let upstream_host = match &manifest.app {
         AppSpec::Image { .. } => manifest.service_name().to_string(),
-        AppSpec::Compose { primary_service, .. } => {
-            primary_service.clone().unwrap_or_else(|| manifest.service_name().to_string())
-        }
+        AppSpec::Compose {
+            primary_service, ..
+        } => primary_service
+            .clone()
+            .unwrap_or_else(|| manifest.service_name().to_string()),
     };
 
     let placement = Placement {
@@ -490,7 +502,10 @@ fn build_service_config(
 
             Some(ContainerSpec {
                 image: image.clone(),
-                resources: manifest.resources.as_ref().map(resource_spec_to_container_resources),
+                resources: manifest
+                    .resources
+                    .as_ref()
+                    .map(resource_spec_to_container_resources),
                 env,
             })
         }
@@ -541,13 +556,13 @@ fn resource_spec_to_container_resources(spec: &ResourceSpec) -> ContainerResourc
         limits: ResourceQuantities {
             memory: spec.memory.as_ref().map(|m| {
                 crate::config::schema::Quantity(
-                    crate::config::schema::parse_quantity_to_mb(m).expect("validated earlier")
+                    crate::config::schema::parse_quantity_to_mb(m).expect("validated earlier"),
                 )
             }),
             cpu_cores: spec.cpu_cores,
             gpu_vram: spec.gpu_vram.as_ref().map(|v| {
                 crate::config::schema::Quantity(
-                    crate::config::schema::parse_quantity_to_mb(v).expect("validated earlier")
+                    crate::config::schema::parse_quantity_to_mb(v).expect("validated earlier"),
                 )
             }),
         },
@@ -577,6 +592,133 @@ async fn stop_service_containers(
         }
     }
     Ok(())
+}
+
+/// Spawn a background task that pulls an app's image(s), starts it once, and
+/// probes its port. The task updates the per-app `AppLifecycleState` as it
+/// progresses (`installed` -> `pulling` -> `ready`/`error`).
+pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
+    tokio::spawn(async move {
+        let Some(app_state) = state.app_state(&app_name) else {
+            return;
+        };
+
+        // If another probe already finished (e.g. catalog reload after install),
+        // leave it alone.
+        let snap = app_state.snapshot();
+        if matches!(snap.state, LifecycleStatus::Ready | LifecycleStatus::Error) {
+            return;
+        }
+
+        app_state.transition(LifecycleStatus::Pulling, None);
+
+        let service_cfg = {
+            let catalog = state.catalog.load();
+            catalog.services.get(&app_name).cloned()
+        };
+
+        let Some(service_cfg) = service_cfg else {
+            app_state.transition(
+                LifecycleStatus::Error,
+                Some("service removed from catalog".to_string()),
+            );
+            return;
+        };
+
+        if let Err(e) = pull_images(&service_cfg).await {
+            app_state.transition(
+                LifecycleStatus::Error,
+                Some(format!("image pull failed: {e}")),
+            );
+            return;
+        }
+
+        // Wait for the driver to be built by the catalog watcher (it reloads
+        // after the install write). Bound the wait so a stuck watcher does not
+        // hang this probe forever.
+        let driver = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(d) = state.drivers.load().get(&app_name).cloned() {
+                    return Some(d);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or(None);
+
+        if let Some(driver) = driver {
+            if let Err(e) = driver.ensure_started().await {
+                app_state.transition(
+                    LifecycleStatus::Error,
+                    Some(format!("failed to start: {e}")),
+                );
+                return;
+            }
+        }
+
+        let host = service_cfg.upstream_host();
+        if !wait_until_ready(host, service_cfg.placement.port).await {
+            app_state.transition(
+                LifecycleStatus::Error,
+                Some("service did not become ready in time".to_string()),
+            );
+            return;
+        }
+
+        app_state.transition(LifecycleStatus::Ready, None);
+        info!(app = %app_name, "app is ready");
+    });
+}
+
+async fn pull_images(service: &ServiceConfig) -> Result<(), AppManagerError> {
+    if let Some(container) = &service.container {
+        let output = Command::new("docker")
+            .args(["pull", &container.image])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(AppManagerError::Command(format!(
+                "docker pull {}: {}",
+                container.image,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        return Ok(());
+    }
+
+    if let Some(stack) = &service.stack_spec {
+        let project_name = stack.project_name.as_deref().ok_or_else(|| {
+            AppManagerError::Validation("stack_spec missing project_name".to_string())
+        })?;
+
+        let mut cmd = Command::new("docker");
+        cmd.arg("compose").arg("-p").arg(project_name);
+        if let Some(path) = &stack.compose_file {
+            cmd.arg("-f").arg(path);
+        }
+        cmd.arg("pull")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = cmd.output().await?;
+        if !output.status.success() {
+            return Err(AppManagerError::Command(format!(
+                "docker compose pull failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        return Ok(());
+    }
+
+    // Should be unreachable because the catalog is validated, but fail closed.
+    Err(AppManagerError::Validation(
+        "service has neither container nor stack_spec".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -657,7 +799,10 @@ schema:
         let manager = AppManager::new(&catalog_path);
 
         let result = manager
-            .install(&package_zip_with_manifest(image_manifest()), InstallValues::default())
+            .install(
+                &package_zip_with_manifest(image_manifest()),
+                InstallValues::default(),
+            )
             .await;
 
         assert!(matches!(result, Err(AppManagerError::Validation(_))));
@@ -685,10 +830,15 @@ schema:
         assert!(!temp_dir.path().join("secrets/test-image").exists());
     }
 
-    fn package_zip_with_encrypted_secret(plaintext: &str, recipient: &age::x25519::Recipient) -> Vec<u8> {
+    fn package_zip_with_encrypted_secret(
+        plaintext: &str,
+        recipient: &age::x25519::Recipient,
+    ) -> Vec<u8> {
         let mut encrypted = Vec::new();
-        let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient.clone()) as Box<dyn age::Recipient + Send>])
-            .expect("recipient is valid");
+        let encryptor = age::Encryptor::with_recipients(vec![
+            Box::new(recipient.clone()) as Box<dyn age::Recipient + Send>
+        ])
+        .expect("recipient is valid");
         {
             let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
             writer.write_all(plaintext.as_bytes()).unwrap();

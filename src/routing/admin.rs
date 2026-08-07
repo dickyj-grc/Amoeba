@@ -4,9 +4,9 @@
 use crate::auth::users::{UserStore, UserStoreError};
 use crate::state::AppState;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -42,7 +42,12 @@ pub async fn create_user(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let mut store = UserStore::load(&state.users_file).map_err(to_http_error)?;
     store
-        .add_user(&payload.username, &payload.password, payload.roles, payload.org_id)
+        .add_user(
+            &payload.username,
+            &payload.password,
+            payload.roles,
+            payload.org_id,
+        )
         .map_err(to_http_error)?;
     store.save(&state.users_file).map_err(to_http_error)?;
 

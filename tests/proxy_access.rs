@@ -1,18 +1,19 @@
 //! End-to-end tests for per-service access control: services default to requiring
 //! a JWT + matching role, and can opt out entirely via "public": true.
 
+use amoeba::apps::state::AppLifecycleState;
 use amoeba::auth::jwt::local_engine;
 use amoeba::routing::proxy::proxy_handler;
 use amoeba::state::AppState;
 use axum::{
-    body::Body,
-    http::{header::AUTHORIZATION, Request, StatusCode},
-    routing::any,
     Router,
+    body::Body,
+    http::{Request, StatusCode, header::AUTHORIZATION},
+    routing::any,
 };
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const JWT_SECRET: &str = "test-proxy-access-secret";
@@ -92,6 +93,10 @@ fn build_app(services_file: &str) -> Router {
     let jwt_engine = std::sync::Arc::new(local_engine(JWT_SECRET));
     let state = AppState::new(services_file, "/nonexistent/users.json", jwt_engine, None);
 
+    // These tests exercise access control, not the install-time readiness probe.
+    // Mark the catalog service as ready so requests reach auth/ACL checks.
+    state.set_app_state("svc", std::sync::Arc::new(AppLifecycleState::ready()));
+
     Router::new()
         .route("/v1/:service_name/*subpath", any(proxy_handler))
         .with_state(state)
@@ -108,10 +113,16 @@ fn get_request(uri: &str, token: Option<&str>) -> Request<Body> {
 #[tokio::test]
 async fn private_service_without_token_is_unauthorized() {
     let path = temp_services_file("private-no-token");
-    write_catalog(&path, container_service(json!({ "permissions": {"read": ["admin"]} })));
+    write_catalog(
+        &path,
+        container_service(json!({ "permissions": {"read": ["admin"]} })),
+    );
 
     let app = build_app(&path);
-    let res = app.oneshot(get_request("/v1/svc/health", None)).await.unwrap();
+    let res = app
+        .oneshot(get_request("/v1/svc/health", None))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     std::fs::remove_file(&path).ok();
@@ -139,7 +150,10 @@ async fn private_service_with_no_permissions_specified_fails_closed() {
 #[tokio::test]
 async fn private_service_with_matching_role_proceeds_past_auth() {
     let path = temp_services_file("private-matching-role");
-    write_catalog(&path, container_service(json!({ "permissions": {"read": ["admin"]} })));
+    write_catalog(
+        &path,
+        container_service(json!({ "permissions": {"read": ["admin"]} })),
+    );
 
     let app = build_app(&path);
     let token = token_with_roles(&["admin"]);
@@ -161,7 +175,10 @@ async fn public_service_without_token_skips_auth_entirely() {
     write_catalog(&path, container_service(json!({ "public": true })));
 
     let app = build_app(&path);
-    let res = app.oneshot(get_request("/v1/svc/health", None)).await.unwrap();
+    let res = app
+        .oneshot(get_request("/v1/svc/health", None))
+        .await
+        .unwrap();
     // Not 401: no token was required at all. The driver-boot-check failure (no
     // such local image) is the only reason this isn't a 2xx.
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -179,7 +196,10 @@ async fn public_service_ignores_permissions_even_if_present() {
 
     let app = build_app(&path);
     // No token, and no role could ever match "admin" anyway -- public still wins.
-    let res = app.oneshot(get_request("/v1/svc/health", None)).await.unwrap();
+    let res = app
+        .oneshot(get_request("/v1/svc/health", None))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     std::fs::remove_file(&path).ok();

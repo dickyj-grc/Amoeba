@@ -89,8 +89,9 @@ pub fn parse_quantity_to_mb(s: &str) -> Result<u64, String> {
             .map_err(|_| format!("invalid quantity '{s}'"));
     }
 
-    s.parse::<u64>()
-        .map_err(|_| format!("invalid quantity '{s}': expected a suffix like Gi/Mi/Ki/Ti or a bare number of MB"))
+    s.parse::<u64>().map_err(|_| {
+        format!("invalid quantity '{s}': expected a suffix like Gi/Mi/Ki/Ti or a bare number of MB")
+    })
 }
 
 /// Named resource quantities as they appear in `services.json` (`memory`/`gpu_vram`
@@ -241,8 +242,13 @@ pub struct StackSpec {
 /// `StackSpec::compose_file`/`services` exclusivity has already been
 /// validated at load time (see `config::watcher::validate_stack_spec_mode`).
 pub enum StackMode<'a> {
-    ComposeFile { path: &'a str, project_name: &'a str },
-    Inline { project_name: &'a str },
+    ComposeFile {
+        path: &'a str,
+        project_name: &'a str,
+    },
+    Inline {
+        project_name: &'a str,
+    },
 }
 
 impl StackSpec {
@@ -258,7 +264,9 @@ impl StackSpec {
         match (&self.compose_file, &self.services) {
             (Some(path), None) => StackMode::ComposeFile { path, project_name },
             (None, Some(_)) => StackMode::Inline { project_name },
-            _ => unreachable!("validate_stack_spec_mode guarantees exactly one of compose_file/services"),
+            _ => unreachable!(
+                "validate_stack_spec_mode guarantees exactly one of compose_file/services"
+            ),
         }
     }
 }
@@ -440,7 +448,10 @@ mod tests {
             }
             StackMode::Inline { .. } => panic!("expected ComposeFile mode"),
         }
-        assert_eq!(svc.env_from_secret.get("DB_PASSWORD").unwrap(), "gorules/db_password");
+        assert_eq!(
+            svc.env_from_secret.get("DB_PASSWORD").unwrap(),
+            "gorules/db_password"
+        );
     }
 
     #[test]

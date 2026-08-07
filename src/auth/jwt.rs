@@ -2,7 +2,7 @@
 
 use super::revocation::InMemoryRevocationStore;
 use super::{AuthMode, Claims, JwtEngine};
-use jsonwebtoken::{encode, EncodingKey, Header, Validation};
+use jsonwebtoken::{EncodingKey, Header, Validation, encode};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Builds a JWT engine configured for local HMAC verification.
@@ -70,8 +70,12 @@ impl JwtEngine {
             jti: uuid::Uuid::new_v4().to_string(),
         };
 
-        encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
-            .map_err(|e| format!("failed to issue token: {}", e))
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .map_err(|e| format!("failed to issue token: {}", e))
     }
 }
 
@@ -89,7 +93,12 @@ mod tests {
     async fn issues_and_verifies_a_local_token() {
         let engine = local_engine("secret");
         let token = engine
-            .issue_token("dicky", Some("org_hq"), &["admin".into()], Duration::from_secs(3600))
+            .issue_token(
+                "dicky",
+                Some("org_hq"),
+                &["admin".into()],
+                Duration::from_secs(3600),
+            )
             .unwrap();
 
         let claims = engine.verify_token(&token).await.unwrap();

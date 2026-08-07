@@ -52,7 +52,10 @@ pub enum DriverError {
     Docker(bollard::errors::Error),
     Io(std::io::Error),
     /// A shelled-out CLI command (`docker compose`, `container`) exited non-zero.
-    CommandFailed { command: String, stderr: String },
+    CommandFailed {
+        command: String,
+        stderr: String,
+    },
     Unavailable(String),
 }
 
@@ -61,7 +64,9 @@ impl fmt::Display for DriverError {
         match self {
             DriverError::Docker(e) => write!(f, "docker engine error: {e}"),
             DriverError::Io(e) => write!(f, "io error: {e}"),
-            DriverError::CommandFailed { command, stderr } => write!(f, "`{command}` failed: {stderr}"),
+            DriverError::CommandFailed { command, stderr } => {
+                write!(f, "`{command}` failed: {stderr}")
+            }
             DriverError::Unavailable(msg) => write!(f, "driver unavailable: {msg}"),
         }
     }
@@ -209,7 +214,10 @@ fn build_container_driver(
         .map(|q| q.0);
 
     if uses_apple_container(svc, catalog) {
-        let cpu_cores = container.resources.as_ref().and_then(|r| r.limits.cpu_cores);
+        let cpu_cores = container
+            .resources
+            .as_ref()
+            .and_then(|r| r.limits.cpu_cores);
         return ServiceDriver::AppleContainer(AppleContainerDriver::new(
             name.to_string(),
             container.image.clone(),
@@ -231,5 +239,8 @@ fn build_container_driver(
 }
 
 fn generated_compose_path(config_dir: &Path, service_name: &str) -> PathBuf {
-    config_dir.join("generated").join(service_name).join("compose.yml")
+    config_dir
+        .join("generated")
+        .join(service_name)
+        .join("compose.yml")
 }

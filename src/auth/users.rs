@@ -1,8 +1,8 @@
 //! Local user store for local_jwt mode: username -> password hash, roles, org_id.
 //! Backs `/etc/amoeba/users.json` (see `config/users.example.json`).
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

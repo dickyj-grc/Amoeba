@@ -4,13 +4,14 @@
 //! with `lifecycle::container`, which is unrelated runtime-activity
 //! bookkeeping (cooldown/connection tracking) — no Docker calls there.
 
-use super::driver::{resolve_env_from_secret, DriverError};
+use super::driver::{DriverError, resolve_env_from_secret};
+use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, InspectContainerOptions, StartContainerOptions, StopContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions, StartContainerOptions,
+    StopContainerOptions,
 };
 use bollard::errors::Error as BollardError;
 use bollard::models::HostConfig;
-use bollard::Docker;
 use std::collections::HashMap;
 
 pub struct DockerContainerDriver {
@@ -51,9 +52,9 @@ impl DockerContainerDriver {
     }
 
     fn docker(&self) -> Result<&Docker, DriverError> {
-        self.docker
-            .as_ref()
-            .ok_or_else(|| DriverError::Unavailable("no connection to the local Docker Engine".to_string()))
+        self.docker.as_ref().ok_or_else(|| {
+            DriverError::Unavailable("no connection to the local Docker Engine".to_string())
+        })
     }
 
     pub async fn ensure_started(&self) -> Result<(), DriverError> {
@@ -64,7 +65,11 @@ impl DockerContainerDriver {
             .await
         {
             Ok(inspect) => {
-                let running = inspect.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+                let running = inspect
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.running)
+                    .unwrap_or(false);
                 if running {
                     return Ok(());
                 }
@@ -73,7 +78,9 @@ impl DockerContainerDriver {
                     .await?;
                 Ok(())
             }
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => self.create_and_start().await,
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => self.create_and_start().await,
             Err(e) => Err(e.into()),
         }
     }
@@ -116,8 +123,12 @@ impl DockerContainerDriver {
         {
             Ok(()) => Ok(()),
             // Already stopped (304) or never created (404): nothing to do.
-            Err(BollardError::DockerResponseServerError { status_code: 304, .. }) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 304, ..
+            }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }

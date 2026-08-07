@@ -4,9 +4,9 @@
 //! (Scenario 3) it regenerates an equivalent compose file on disk before
 //! every `ensure_started`, then drives it through the identical CLI path.
 
-use super::driver::{resolve_env_from_secret, DriverError};
+use super::driver::{DriverError, resolve_env_from_secret};
 use crate::config::schema::{InlineComposeService, StackSpec};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -84,7 +84,9 @@ impl ComposeDriver {
     }
 
     async fn service_exists(&self) -> Result<bool, DriverError> {
-        let output = self.run(&["ps", "-q", self.primary_service.as_str()]).await?;
+        let output = self
+            .run(&["ps", "-q", self.primary_service.as_str()])
+            .await?;
         Ok(!output.stdout.is_empty())
     }
 
@@ -98,13 +100,17 @@ impl ComposeDriver {
         if let Some(parent) = self.compose_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let contents =
-            serde_json::to_vec_pretty(&document).expect("generated compose document is always valid JSON");
+        let contents = serde_json::to_vec_pretty(&document)
+            .expect("generated compose document is always valid JSON");
         std::fs::write(&self.compose_file, contents)?;
 
         if !stack.env_vars.is_empty() {
             if let Some(parent) = self.compose_file.parent() {
-                let contents: String = stack.env_vars.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+                let contents: String = stack
+                    .env_vars
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}\n"))
+                    .collect();
                 std::fs::write(parent.join(".env"), contents)?;
             }
         }
@@ -116,7 +122,11 @@ impl ComposeDriver {
         let secret_env = resolve_env_from_secret(&self.env_from_secret)?;
 
         let mut cmd = Command::new("docker");
-        cmd.arg("compose").arg("-f").arg(&self.compose_file).arg("-p").arg(&self.project_name);
+        cmd.arg("compose")
+            .arg("-f")
+            .arg(&self.compose_file)
+            .arg("-p")
+            .arg(&self.project_name);
 
         if let Some(stack) = &self.inline {
             if !stack.env_vars.is_empty() {
@@ -157,7 +167,10 @@ impl ComposeDriver {
 /// to "must already exist" fails loud (a clear "network not found" from
 /// `docker compose`) rather than silently creating an isolated network that
 /// breaks connectivity to a shared one (e.g. the gateway's own network).
-fn generate_compose_document(stack: &StackSpec, services: &HashMap<String, InlineComposeService>) -> Value {
+fn generate_compose_document(
+    stack: &StackSpec,
+    services: &HashMap<String, InlineComposeService>,
+) -> Value {
     let mut networks_referenced: BTreeSet<&str> = BTreeSet::new();
     let mut compose_services = Map::new();
 
@@ -185,7 +198,11 @@ fn generate_compose_document(stack: &StackSpec, services: &HashMap<String, Inlin
 
     let mut networks_section = Map::new();
     for net in networks_referenced {
-        let external = stack.networks.get(net).map(|spec| spec.external).unwrap_or(true);
+        let external = stack
+            .networks
+            .get(net)
+            .map(|spec| spec.external)
+            .unwrap_or(true);
         networks_section.insert(net.to_string(), json!({ "external": external }));
     }
 
@@ -230,7 +247,10 @@ mod tests {
     #[test]
     fn referenced_network_without_explicit_entry_defaults_to_external() {
         let stack = empty_stack_spec();
-        let services = HashMap::from([("brms".to_string(), inline_service("gorules/brms:latest", &["proxy-network"]))]);
+        let services = HashMap::from([(
+            "brms".to_string(),
+            inline_service("gorules/brms:latest", &["proxy-network"]),
+        )]);
 
         let document = generate_compose_document(&stack, &services);
         let networks = document.get("networks").unwrap().as_object().unwrap();
@@ -240,10 +260,14 @@ mod tests {
     #[test]
     fn explicit_network_override_is_respected() {
         let mut stack = empty_stack_spec();
-        stack
-            .networks
-            .insert("gorules_network".to_string(), InlineNetworkSpec { external: false });
-        let services = HashMap::from([("brms".to_string(), inline_service("gorules/brms:latest", &["gorules_network"]))]);
+        stack.networks.insert(
+            "gorules_network".to_string(),
+            InlineNetworkSpec { external: false },
+        );
+        let services = HashMap::from([(
+            "brms".to_string(),
+            inline_service("gorules/brms:latest", &["gorules_network"]),
+        )]);
 
         let document = generate_compose_document(&stack, &services);
         let networks = document.get("networks").unwrap().as_object().unwrap();
@@ -270,7 +294,10 @@ mod tests {
     #[test]
     fn no_networks_section_when_no_service_references_any() {
         let stack = empty_stack_spec();
-        let services = HashMap::from([("brms".to_string(), inline_service("gorules/brms:latest", &[]))]);
+        let services = HashMap::from([(
+            "brms".to_string(),
+            inline_service("gorules/brms:latest", &[]),
+        )]);
 
         let document = generate_compose_document(&stack, &services);
         assert!(document.get("networks").is_none());

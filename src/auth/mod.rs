@@ -6,7 +6,7 @@ pub mod middleware;
 pub mod revocation;
 pub mod users;
 
-use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
 use revocation::InMemoryRevocationStore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -75,7 +75,7 @@ impl JwtEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn local_engine(secret: &str) -> JwtEngine {

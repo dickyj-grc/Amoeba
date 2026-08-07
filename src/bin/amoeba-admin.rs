@@ -158,7 +158,12 @@ mod tests {
     #[test]
     fn parses_add_user_flags() {
         let flags = parse_flags(&args(&[
-            "dicky", "hunter2", "--roles", "admin,analyst", "--org", "org_hq",
+            "dicky",
+            "hunter2",
+            "--roles",
+            "admin,analyst",
+            "--org",
+            "org_hq",
         ]))
         .unwrap();
 

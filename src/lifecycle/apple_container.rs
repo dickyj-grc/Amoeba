@@ -13,7 +13,7 @@
 //! the freshly-resolved IP on every call — the caller (`routing::proxy`)
 //! caches it in `ServiceRuntimeState` for reuse by warm requests.
 
-use super::driver::{resolve_env_from_secret, DriverError};
+use super::driver::{DriverError, resolve_env_from_secret};
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -84,7 +84,12 @@ impl AppleContainerDriver {
     async fn create_and_start(&self) -> Result<(), DriverError> {
         let env = resolve_env_from_secret(&self.env_from_secret)?;
 
-        let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), self.container_name.clone()];
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            self.container_name.clone(),
+        ];
         if let Some(mb) = self.memory_limit_mb {
             args.push("-m".into());
             args.push(format!("{mb}M"));
@@ -124,7 +129,10 @@ impl AppleContainerDriver {
 
     async fn run(&self, args: &[&str]) -> Result<std::process::Output, DriverError> {
         let mut cmd = Command::new("container");
-        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         Ok(cmd.output().await?)
     }
 
@@ -145,17 +153,22 @@ impl AppleContainerDriver {
 /// suffix stripped (Apple's CLI reports e.g. `"192.168.64.3/24"`) and is
 /// `None` when the container has no network entry yet (e.g. still starting).
 fn parse_inspect_output(json: &str) -> Result<(String, Option<String>), DriverError> {
-    let value: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| DriverError::Unavailable(format!("failed to parse `container inspect` output: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        DriverError::Unavailable(format!("failed to parse `container inspect` output: {e}"))
+    })?;
 
     let entry = value
         .as_array()
         .and_then(|arr| arr.first())
-        .ok_or_else(|| DriverError::Unavailable("`container inspect` returned no entries".to_string()))?;
+        .ok_or_else(|| {
+            DriverError::Unavailable("`container inspect` returned no entries".to_string())
+        })?;
 
     let state = entry["status"]["state"]
         .as_str()
-        .ok_or_else(|| DriverError::Unavailable("`container inspect` output missing status.state".to_string()))?
+        .ok_or_else(|| {
+            DriverError::Unavailable("`container inspect` output missing status.state".to_string())
+        })?
         .to_string();
 
     let ip = entry["status"]["networks"]
