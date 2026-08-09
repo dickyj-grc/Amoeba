@@ -14,9 +14,10 @@ use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Path, Request, State},
-    http::{HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION},
+    http::{HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION, header::HOST},
     response::Response,
 };
+use futures_util::StreamExt;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 use tracing::{error, info};
@@ -71,6 +72,43 @@ pub fn apply_upstream_auth(
     }
 
     outbound_req
+}
+
+/// RAII guard that increments `active_connections` on creation and decrements
+/// on drop. Moved into the response body stream so the connection is counted
+/// until the client finishes reading (or disconnects), not just until response
+/// headers arrive. This makes scale-to-zero safe for streamed/SSE responses.
+struct ConnGuard(Arc<ServiceRuntimeState>);
+
+impl ConnGuard {
+    fn acquire(runtime: Arc<ServiceRuntimeState>) -> Self {
+        runtime.active_connections.fetch_add(1, Ordering::Relaxed);
+        Self(runtime)
+    }
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Hop-by-hop headers that must not be blindly forwarded between client and
+/// upstream. Dropping these prevents connection-management confusion (e.g.
+/// `Transfer-Encoding: chunked` from upstream being misinterpreted by the
+/// gateway) and avoids leaking proxy internals.
+fn is_hop_by_hop(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str().to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 pub async fn proxy_handler(
@@ -162,7 +200,9 @@ pub async fn proxy_handler(
     let previous_has_activated = runtime.has_activated.load(Ordering::Relaxed);
 
     runtime.touch();
-    runtime.active_connections.fetch_add(1, Ordering::Relaxed);
+    // Acquire the connection guard first; every early-return path below simply
+    // drops it, which decrements the counter automatically.
+    let guard = ConnGuard::acquire(runtime.clone());
 
     let was_already_occupying = is_occupying_capacity(
         service_cfg.placement.cooldown_seconds,
@@ -228,9 +268,7 @@ pub async fn proxy_handler(
         };
 
         if capacity_rejected {
-            // Roll back the increment above: this request never actually
-            // proceeds, so it must not permanently inflate the counter.
-            runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
+            // The guard drops here, rolling back the connection counter.
             return Ok(rejection(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "machine-capacity",
@@ -247,7 +285,6 @@ pub async fn proxy_handler(
                 Ok(Some(host)) => runtime.set_resolved_host(host),
                 Ok(None) => {}
                 Err(e) => {
-                    runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
                     error!(service = %service_name, "failed to start service: {e}");
                     return Ok(rejection(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -261,7 +298,6 @@ pub async fn proxy_handler(
             .resolved_host()
             .unwrap_or_else(|| service_cfg.upstream_host().to_string());
         if !wait_until_ready(&host, service_cfg.placement.port).await {
-            runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
             error!(service = %service_name, "service did not become ready in time");
             return Ok(rejection(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -280,6 +316,16 @@ pub async fn proxy_handler(
     let target_url = build_target_url(&host, service_cfg.placement.port, &subpath);
     let mut outbound_req = state.http_client.request(req.method().clone(), &target_url);
 
+    // 6.5. Forward client headers before consuming the body. Skip hop-by-hop
+    // headers, HOST (reqwest sets the upstream host), and AUTHORIZATION (handled
+    // by upstream_auth injection below). SSE/MCP clients need Accept,
+    // Mcp-Session-Id, Last-Event-ID, etc. to reach the upstream.
+    for (name, value) in req.headers() {
+        if !is_hop_by_hop(name) && name != HOST && name != AUTHORIZATION {
+            outbound_req = outbound_req.header(name, value);
+        }
+    }
+
     // 7. Handle Upstream Token Translation / Credential Injection
     outbound_req = apply_upstream_auth(outbound_req, service_cfg);
 
@@ -293,18 +339,12 @@ pub async fn proxy_handler(
     // 8. Execute Forward Proxy Request
     let response = outbound_req.send().await;
 
-    // Decrement Connection Counter
-    runtime.active_connections.fetch_sub(1, Ordering::Relaxed);
-
     match response {
         Ok(res) => {
             let status = res.status();
-            let res_bytes = res
-                .bytes()
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            // 9. Emit Usage Telemetry Log
+            // 9. Emit Usage Telemetry Log (at response-headers time; body may
+            // stream for minutes for SSE).
             emit_usage_telemetry(
                 claims
                     .as_ref()
@@ -317,10 +357,33 @@ pub async fn proxy_handler(
                 start_time.elapsed().as_millis(),
             );
 
-            Ok(Response::builder()
-                .status(status)
-                .body(Body::from(res_bytes))
-                .unwrap())
+            // Copy response headers before consuming the body.
+            let response_headers: Vec<_> = res
+                .headers()
+                .iter()
+                .filter(|(name, _)| !is_hop_by_hop(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+
+            // 10. Stream the response body back to the client. The connection
+            // guard is moved into the stream closure so `active_connections`
+            // stays incremented until the client finishes reading or disconnects.
+            // `touch()` on each chunk advances the idle clock, so the reaper only
+            // scales down silent streams, not active ones.
+            let rt = runtime.clone();
+            let stream = res.bytes_stream().inspect(move |_| {
+                let _ = &guard; // hold the guard for the lifetime of the stream
+                rt.touch();
+            });
+            let body = Body::from_stream(stream);
+
+            let mut builder = Response::builder().status(status);
+            for (name, value) in response_headers {
+                builder = builder.header(name, value);
+            }
+            builder
+                .body(body)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         }
         Err(_) => Err(StatusCode::BAD_GATEWAY),
     }

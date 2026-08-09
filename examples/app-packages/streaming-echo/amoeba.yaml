@@ -1,0 +1,17 @@
+api_version: v1
+name: streaming-echo
+version: 1.0.0
+description: A tiny SSE streaming server for testing Amoeba's streaming proxy.
+app:
+  type: compose
+  compose_file: compose.yaml
+placement:
+  port: 8080
+  cooldown_seconds: 30
+permissions:
+  read: [admin, analyst]
+schema:
+  env:
+    MESSAGE:
+      type: string
+      default: "hello from stream"

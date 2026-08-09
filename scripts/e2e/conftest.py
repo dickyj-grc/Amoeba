@@ -165,6 +165,27 @@ def wait_for_amoeba(ip: str, timeout: int = 300) -> None:
     raise RuntimeError("Timed out waiting for Amoeba")
 
 
+def wait_for_app_ready(base_url: str, admin_token: str, app_name: str, timeout_seconds: int = 180) -> dict:
+    """Poll the app status endpoint until it reaches ready or error."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        resp = requests.get(
+            f"{base_url}/admin/apps/{app_name}",
+            headers=auth_header(admin_token),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        state = body["state"]["state"]
+        print(f"App '{app_name}' state: {state}")
+        if state == "ready":
+            return body
+        if state == "error":
+            raise AssertionError(f"app '{app_name}' failed to become ready: {body['state']['message']}")
+        time.sleep(2)
+    raise AssertionError(f"app '{app_name}' did not become ready within {timeout_seconds}s")
+
+
 def login(base_url: str, username: str, password: str) -> str:
     """Obtain a JWT for the given user."""
     resp = requests.post(

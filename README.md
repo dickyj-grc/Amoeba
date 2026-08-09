@@ -713,7 +713,7 @@ Revocation is stored in memory only and is lost when the process restarts. After
 
 Amoeba supports a self-contained app package format so any open-source project can ship a deployable bundle. A package is a zip file containing an `amoeba.yaml` manifest and a standard `compose.yaml` (or image reference). Install and uninstall are token-gated admin API calls; Amoeba hot-reloads `services.json` without a restart.
 
-See `examples/app-packages/hello-world/` for a working example.
+See `examples/app-packages/hello-world/` for a working example and `examples/app-packages/streaming-echo/` for an SSE streaming example.
 
 ### 7.1 Package structure
 
@@ -827,6 +827,8 @@ Response:
 
 Until the app is `ready`, the proxy rejects requests with `503 Service Unavailable` and `x-amoeba-rejection-reason: app-not-ready` (or `app-error`). This prevents the first API call from blocking on a slow registry download or a broken image, and gives the operator a clear signal when something is wrong.
 
+The proxy also supports **streaming responses** (SSE, MCP Streamable HTTP, and any chunked body). It does not buffer the response body; instead it forwards headers and streams chunks to the client while keeping `active_connections` open until the stream finishes or the client disconnects. A read (inactivity) timeout on the upstream client ensures silent streams can still scale to zero once they end.
+
 ---
 
 ## 8. Nightly End-to-End Test on DigitalOcean
@@ -896,5 +898,6 @@ pytest scripts/e2e/ -v
    - Malformed or missing app package → `400`
    - Non-admin user creation attempt → `403`
    - Revoked token → `401`
-10. After the cooldown, the container is stopped (scale-to-zero).
-11. Droplet is destroyed.
+10. Streaming responses are not buffered: `GET /v1/streaming-echo/stream` receives multiple SSE chunks over several seconds.
+11. After the cooldown, the container is stopped (scale-to-zero).
+12. Droplet is destroyed.

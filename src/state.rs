@@ -17,7 +17,7 @@ use std::time::Duration;
 use tracing::warn;
 
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
     pub catalog: ArcSwap<ServiceCatalog>,
@@ -71,9 +71,13 @@ impl AppState {
         // A bare `reqwest::Client::new()` has no timeout at all, so a backend that
         // never responds (or a connection that's silently dropped rather than
         // actively refused) would hang the proxied request forever.
+        // Use a read (inactivity) timeout, not a total wall-clock timeout: a total
+        // timeout would guillotine long-lived SSE streams once the deadline is hit,
+        // whereas a read timeout only fires when the upstream sends nothing for the
+        // configured window — exactly what scale-to-zero needs to know.
         let http_client = reqwest::Client::builder()
             .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
-            .timeout(UPSTREAM_REQUEST_TIMEOUT)
+            .read_timeout(UPSTREAM_READ_TIMEOUT)
             .build()
             .expect("failed to build upstream HTTP client");
 
