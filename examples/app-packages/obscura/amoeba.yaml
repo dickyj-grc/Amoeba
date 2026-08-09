@@ -1,0 +1,14 @@
+api_version: v1
+name: obscura
+version: 1.0.0
+description: Obscura headless browser (CDP server) for AI agents and web scraping.
+app:
+  type: compose
+  compose_file: compose.yaml
+placement:
+  port: 9222
+  cooldown_seconds: 180
+permissions:
+  read: [admin, analyst]
+schema:
+  env: {}

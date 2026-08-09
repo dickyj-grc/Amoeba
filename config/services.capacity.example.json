@@ -29,10 +29,10 @@
     },
     "obscura": {
       "placement": {
-        "type": "vm", "ip": "gpu-box-1-obscura", "port": 7000, "cooldown_seconds": 180, "machine": "gpu-box-1"
+        "type": "vm", "ip": "gpu-box-1-obscura", "port": 9222, "cooldown_seconds": 180, "machine": "gpu-box-1"
       },
       "container": {
-        "image": "obscura/obscura-serve:latest",
+        "image": "h4ckf0r0day/obscura:latest",
         "resources": { "limits": { "memory": "8Gi", "gpu_vram": "8Gi" } }
       },
       "permissions": {

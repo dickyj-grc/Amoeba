@@ -713,7 +713,7 @@ Revocation is stored in memory only and is lost when the process restarts. After
 
 Amoeba supports a self-contained app package format so any open-source project can ship a deployable bundle. A package is a zip file containing an `amoeba.yaml` manifest and a standard `compose.yaml` (or image reference). Install and uninstall are token-gated admin API calls; Amoeba hot-reloads `services.json` without a restart.
 
-See `examples/app-packages/hello-world/` for a working example and `examples/app-packages/streaming-echo/` for an SSE streaming example.
+See `examples/app-packages/hello-world/` for a working example, `examples/app-packages/streaming-echo/` for an SSE streaming example, and `examples/app-packages/obscura/` for a headless-browser package.
 
 ### 7.1 Package structure
 
@@ -899,5 +899,6 @@ pytest scripts/e2e/ -v
    - Non-admin user creation attempt → `403`
    - Revoked token → `401`
 10. Streaming responses are not buffered: `GET /v1/streaming-echo/stream` receives multiple SSE chunks over several seconds.
-11. After the cooldown, the container is stopped (scale-to-zero).
-12. Droplet is destroyed.
+11. Obscura headless browser installs, its CDP endpoint is reachable through the proxy, and `obscura fetch https://example.com` returns the page.
+12. After the cooldown, the container is stopped (scale-to-zero).
+13. Droplet is destroyed.
