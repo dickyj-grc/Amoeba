@@ -46,6 +46,11 @@ services:
 
 networks:
   amoeba-net:
+    # Pinned so the literal Docker network name is always "amoeba-net", not
+    # Compose's default `<project_name>_amoeba-net`. App packages' compose.yaml
+    # files reference it via `networks: amoeba-net: external: true` and need the
+    # exact name to resolve, regardless of what project name this stack is run under.
+    name: amoeba-net
     driver: bridge
 
 volumes:

@@ -111,6 +111,19 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     )
 }
 
+/// Handles the bare `/v1/:service_name/` root (no path segments after the
+/// trailing slash). axum/matchit's `*subpath` wildcard only matches a
+/// *non-empty* capture, so `/v1/:service_name/*subpath` alone never matches
+/// this request at all -- it needs its own route, delegating to the same
+/// logic with an empty subpath.
+pub async fn proxy_handler_root(
+    state: State<Arc<AppState>>,
+    Path(service_name): Path<String>,
+    req: Request,
+) -> Result<Response, StatusCode> {
+    proxy_handler(state, Path((service_name, String::new())), req).await
+}
+
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     Path((service_name, subpath)): Path<(String, String)>,

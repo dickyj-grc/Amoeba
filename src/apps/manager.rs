@@ -612,10 +612,20 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
 
         app_state.transition(LifecycleStatus::Pulling, None);
 
-        let service_cfg = {
-            let catalog = state.catalog.load();
-            catalog.services.get(&app_name).cloned()
-        };
+        // Wait for the catalog watcher to pick up the just-written service
+        // (it reloads asynchronously after the install handler writes
+        // services.json). Bound the wait so a stuck watcher does not hang
+        // this probe forever; a real removal still surfaces as an error.
+        let service_cfg = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(cfg) = state.catalog.load().services.get(&app_name).cloned() {
+                    return Some(cfg);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or(None);
 
         let Some(service_cfg) = service_cfg else {
             app_state.transition(
@@ -647,14 +657,30 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
         .await
         .unwrap_or(None);
 
-        if let Some(driver) = driver {
-            if let Err(e) = driver.ensure_started().await {
-                app_state.transition(
-                    LifecycleStatus::Error,
-                    Some(format!("failed to start: {e}")),
-                );
-                return;
-            }
+        let Some(driver) = driver else {
+            app_state.transition(
+                LifecycleStatus::Error,
+                Some("driver was not built in time".to_string()),
+            );
+            return;
+        };
+
+        if let Err(e) = driver.ensure_started().await {
+            app_state.transition(
+                LifecycleStatus::Error,
+                Some(format!("failed to start: {e}")),
+            );
+            return;
+        }
+
+        // A reinstall reuses the existing `ServiceRuntimeState` entry (keyed by
+        // app name, not container instance), so its `last_accessed_unix` can be
+        // stale from a previous run. Reset it now that a fresh container has
+        // actually started, or the reaper's next sweep (every 10s) can see a
+        // long-idle timestamp and scale this brand-new container back to zero
+        // before anyone ever gets to use it.
+        if let Some(runtime) = state.runtime_states.load().get(&app_name) {
+            runtime.touch();
         }
 
         let host = service_cfg.upstream_host();

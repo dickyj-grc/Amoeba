@@ -4,7 +4,7 @@ use amoeba::auth::revocation::InMemoryRevocationStore;
 use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::apps_admin::{get_app_status, install_app, list_apps, uninstall_app};
 use amoeba::routing::auth::{login, revoke};
-use amoeba::routing::proxy::proxy_handler;
+use amoeba::routing::proxy::{proxy_handler, proxy_handler_root};
 use amoeba::state::AppState;
 use axum::{
     Router, middleware,
@@ -79,6 +79,7 @@ async fn main() {
     // token is required at all depends on the target service's "public" flag,
     // which isn't known until the service catalog has been consulted.
     let app = Router::new()
+        .route("/v1/:service_name/", any(proxy_handler_root))
         .route("/v1/:service_name/*subpath", any(proxy_handler))
         .nest("/admin", admin_routes)
         .nest("/auth", auth_routes)

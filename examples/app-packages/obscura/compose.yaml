@@ -11,3 +11,9 @@ services:
       - "9222"
     ports:
       - "9222"
+    networks:
+      - amoeba-net
+
+networks:
+  amoeba-net:
+    external: true

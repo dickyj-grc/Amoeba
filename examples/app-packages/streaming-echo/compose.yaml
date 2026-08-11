@@ -30,3 +30,9 @@ services:
         PY
     ports:
       - "8080"
+    networks:
+      - amoeba-net
+
+networks:
+  amoeba-net:
+    external: true
