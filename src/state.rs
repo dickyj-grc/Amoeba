@@ -114,11 +114,12 @@ impl AppState {
                     .or_insert_with(|| Arc::new(AppLifecycleState::installed()));
             }
 
-            let _new_drivers = driver::build_all(&new_catalog, &config_dir, docker.clone());
+            let new_drivers = driver::build_all(&new_catalog, &config_dir, docker.clone());
 
             state.catalog.store(Arc::new(new_catalog));
             state.runtime_states.store(Arc::new(new_runtimes));
             state.app_states.store(Arc::new(new_app_states));
+            state.drivers.store(Arc::new(new_drivers));
         });
     }
 }
