@@ -2,13 +2,6 @@ services:
   obscura:
     image: h4ckf0r0day/obscura:latest
     container_name: amoeba-obscura
-    command:
-      - obscura
-      - serve
-      - --host
-      - 0.0.0.0
-      - --port
-      - "9222"
     ports:
       - "9222"
     networks:

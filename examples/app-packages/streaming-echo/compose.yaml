@@ -2,6 +2,8 @@ services:
   streaming-echo:
     image: python:3.12-slim
     container_name: amoeba-streaming-echo
+    environment:
+      - MESSAGE=${MESSAGE}
     command:
       - sh
       - -c
