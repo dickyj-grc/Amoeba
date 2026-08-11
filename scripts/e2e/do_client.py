@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from typing import Any
@@ -40,21 +41,35 @@ class DigitalOceanClient:
         self.session.headers.update(_headers())
 
     def create_or_reuse_ssh_key(self, name: str, public_key: str) -> int:
-        """Register or reuse a public SSH key in DO. Returns the key ID."""
+        """Register or reuse a public SSH key in DO. Returns the key ID.
+
+        Matches by key *content*, not name: whoever runs the e2e suite (a
+        developer's laptop, a CI runner, ...) passes in their own
+        DO_SSH_PUBLIC_KEY, and different callers must not collide on the
+        shared droplet_name-derived key name and silently reuse someone
+        else's key (which would seed the droplet's authorized_keys with a
+        key the caller doesn't hold the private half of).
+        """
+        normalized = public_key.strip()
         resp = self.session.get(f"{DO_API}/account/keys")
         resp.raise_for_status()
         for key in resp.json().get("ssh_keys", []):
-            if key["name"] == name:
-                print(f"Reusing existing SSH key '{name}' id={key['id']}")
+            if key["public_key"].strip() == normalized:
+                print(f"Reusing existing SSH key '{key['name']}' id={key['id']} (matched by content)")
                 return key["id"]
 
+        # No registered key has this content. Suffix the name with a hash of the
+        # key so it can't collide with an existing, differently-keyed entry still
+        # sitting under the plain `name` (e.g. registered by another machine).
+        suffix = hashlib.sha256(normalized.encode()).hexdigest()[:8]
+        unique_name = f"{name}-{suffix}"
         resp = self.session.post(
             f"{DO_API}/account/keys",
-            json={"name": name, "public_key": public_key},
+            json={"name": unique_name, "public_key": public_key},
         )
         resp.raise_for_status()
         key_id = resp.json()["ssh_key"]["id"]
-        print(f"Created SSH key '{name}' id={key_id}")
+        print(f"Created SSH key '{unique_name}' id={key_id}")
         return key_id
 
     def create_droplet(
