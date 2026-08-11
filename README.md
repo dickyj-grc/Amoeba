@@ -899,6 +899,6 @@ pytest scripts/e2e/ -v
    - Non-admin user creation attempt → `403`
    - Revoked token → `401`
 10. Streaming responses are not buffered: `GET /v1/streaming-echo/stream` receives multiple SSE chunks over several seconds.
-11. Obscura headless browser installs, its CDP endpoint is reachable through the proxy, and `obscura fetch https://example.com` returns the page.
+11. Obscura headless browser installs, its MCP endpoint is reachable through the proxy, and a `browser_navigate` + `browser_snapshot` tool call round-trip returns real page content.
 12. After the cooldown, the container is stopped (scale-to-zero).
 13. Droplet is destroyed.

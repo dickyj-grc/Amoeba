@@ -1,14 +1,18 @@
 api_version: v1
 name: obscura
 version: 1.0.0
-description: Obscura headless browser (CDP server) for AI agents and web scraping.
+description: Obscura headless browser (MCP server) for AI agents and web scraping.
 app:
   type: compose
   compose_file: compose.yaml
 placement:
-  port: 9222
+  port: 3000
   cooldown_seconds: 180
 permissions:
+  # MCP's Streamable HTTP transport uses POST for every call (initialize,
+  # tools/list, tools/call, ...), which Amoeba classifies as the "add"
+  # operation -- read-only wouldn't be enough to call any MCP method at all.
   read: [admin, analyst]
+  add: [admin, analyst]
 schema:
   env: {}
