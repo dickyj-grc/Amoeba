@@ -57,8 +57,10 @@ def test_obscura_can_fetch_url(base_url: str, admin_token: str, ssh) -> None:
     )
     resp.raise_for_status()
 
+    # The image's ENTRYPOINT is the absolute path /obscura, which isn't on
+    # $PATH inside the container -- `docker exec` needs the absolute path too.
     out = ssh.run(
-        "docker compose -p obscura exec -T obscura obscura fetch https://example.com --dump text",
+        "docker compose -p obscura exec -T obscura /obscura fetch https://example.com --dump text",
         timeout=60,
     )
     print(f"obscura fetch output: {out[:500]}")
