@@ -54,11 +54,16 @@ cat > "$AMOEBA_DIR/Caddyfile" <<'EOF'
 }
 EOF
 
-# Start Amoeba (Caddy + orchestrator) via Docker Compose
+# Start Amoeba (Caddy + orchestrator) via Docker Compose, pulling the orchestrator
+# image built by .github/workflows/docker-release.yml instead of compiling from
+# source on every droplet (docker-compose.e2e.yml swaps `build: .` for `image:`).
 cd "$AMOEBA_DIR"
 AMOEBA_LOCAL_JWT_SECRET="$JWT_SECRET" \
 AMOEBA_AGE_SECRET_KEY="$AGE_SECRET" \
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.e2e.yml pull
+AMOEBA_LOCAL_JWT_SECRET="$JWT_SECRET" \
+AMOEBA_AGE_SECRET_KEY="$AGE_SECRET" \
+docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
 
 # Wait for Amoeba to be ready (Caddy proxies port 80 to the orchestrator)
 for i in $(seq 1 60); do

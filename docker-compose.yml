@@ -17,7 +17,10 @@ services:
   # 2. Amoeba Compute Orchestrator (Rust binary)
   orchestrator:
     build: .
-    # Swap the `build: .` line above for `image: amoeba/amoeba:latest` once you publish an image.
+    # Pre-built images are published to ghcr.io/dickyj-grc/amoeba on every push to main
+    # (see .github/workflows/docker-release.yml). Swap `build: .` for
+    # `image: ghcr.io/dickyj-grc/amoeba:latest` to use one instead of building locally
+    # (docker-compose.e2e.yml does this for the nightly e2e droplet).
     container_name: amoeba-orchestrator
     restart: unless-stopped
     environment:

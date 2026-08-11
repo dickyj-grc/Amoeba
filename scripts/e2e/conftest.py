@@ -106,7 +106,11 @@ def droplet(
     try:
         ip = do_client.wait_for_droplet(droplet_id)
         wait_for_ssh(ip, ssh_private_key)
-        wait_for_amoeba(ip)
+        try:
+            wait_for_amoeba(ip, timeout=600)
+        except RuntimeError:
+            _dump_cloud_init_log(ip, ssh_private_key)
+            raise
         yield ip
     finally:
         if not pytestconfig.getoption("--keep-droplet"):
@@ -149,6 +153,24 @@ def viewer_token(base_url: str, admin_token: str) -> str:
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+def _dump_cloud_init_log(ip: str, private_key: str) -> None:
+    """Best-effort: pull cloud-init's output log before the droplet is destroyed.
+
+    The droplet is torn down as soon as the `droplet` fixture's setup fails, so this
+    is the only chance to see why provisioning (docker install, image pull, etc.)
+    never reached a healthy Amoeba.
+    """
+    out_path = Path("e2e-cloud-init-failure.log")
+    try:
+        log = SshClient(ip, private_key).run("cat /var/log/cloud-init-output.log", timeout=30)
+    except Exception as exc:
+        out_path.write_text(f"Could not retrieve cloud-init log: {exc}\n")
+        print(f"Could not retrieve cloud-init log: {exc}")
+        return
+    out_path.write_text(log)
+    print(f"Saved cloud-init log to {out_path} ({len(log)} bytes)")
+
 
 def wait_for_amoeba(ip: str, timeout: int = 300) -> None:
     """Wait until Amoeba responds on port 80 (any non-5xx status means it is up)."""
