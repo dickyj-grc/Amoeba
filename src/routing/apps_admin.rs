@@ -150,6 +150,9 @@ fn app_manager(state: &AppState) -> AppManager {
 fn map_manager_error(e: AppManagerError) -> (StatusCode, String) {
     match e {
         AppManagerError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
+        AppManagerError::Zip(_) | AppManagerError::Yaml(_) | AppManagerError::Json(_) => {
+            (StatusCode::BAD_REQUEST, e.to_string())
+        }
         AppManagerError::Io(msg) if msg.to_string().contains("not found") => {
             (StatusCode::NOT_FOUND, msg.to_string())
         }

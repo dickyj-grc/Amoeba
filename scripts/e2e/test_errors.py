@@ -46,7 +46,9 @@ class TestAdminErrors:
         )
         assert resp.status_code == 404
 
-    def test_duplicate_user_returns_409(self, base_url: str, admin_token: str) -> None:
+    def test_duplicate_user_returns_409(self, base_url: str, admin_token: str, analyst_token: str) -> None:
+        # `analyst_token` (unused directly) guarantees the 'analyst' user already
+        # exists before this runs, regardless of test collection/execution order.
         resp = requests.post(
             f"{base_url}/admin/users",
             headers=auth_header(admin_token),
@@ -59,7 +61,10 @@ class TestAdminErrors:
         resp = requests.post(
             f"{base_url}/admin/apps",
             headers=auth_header(admin_token),
-            data={"values": "{}"},
+            # `files=` (not `data=`) forces genuine multipart/form-data encoding so
+            # this actually exercises the handler's "missing 'package' field" path
+            # instead of silently sending application/x-www-form-urlencoded.
+            files={"values": (None, "{}")},
             timeout=10,
         )
         assert resp.status_code == 400
