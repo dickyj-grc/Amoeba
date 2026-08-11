@@ -870,7 +870,7 @@ pip install -r scripts/requirements-e2e.txt
 python scripts/e2e-do.py
 ```
 
-Add `--keep` to leave the droplet alive for debugging. You can also run pytest directly:
+Add `--keep-droplet` to leave the droplet alive for debugging. You can also run pytest directly:
 
 ```bash
 pytest scripts/e2e/ -v
