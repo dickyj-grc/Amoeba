@@ -58,11 +58,18 @@ EOF
 # image built by .github/workflows/docker-release.yml instead of compiling from
 # source on every droplet (docker-compose.e2e.yml swaps `build: .` for `image:`).
 cd "$AMOEBA_DIR"
-AMOEBA_LOCAL_JWT_SECRET="$JWT_SECRET" \
-AMOEBA_AGE_SECRET_KEY="$AGE_SECRET" \
+
+# Persist secrets to .env so `docker compose` can interpolate them on every
+# invocation (up, exec, logs, ...), not just the one command they're inlined
+# into below. The e2e test suite runs `docker compose exec` over its own
+# fresh SSH connections, which don't inherit this script's shell env.
+cat > "$AMOEBA_DIR/.env" <<EOF
+AMOEBA_LOCAL_JWT_SECRET=$JWT_SECRET
+AMOEBA_AGE_SECRET_KEY=$AGE_SECRET
+EOF
+chmod 600 "$AMOEBA_DIR/.env"
+
 docker compose -f docker-compose.yml -f docker-compose.e2e.yml pull
-AMOEBA_LOCAL_JWT_SECRET="$JWT_SECRET" \
-AMOEBA_AGE_SECRET_KEY="$AGE_SECRET" \
 docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
 
 # Wait for Amoeba to be ready (Caddy proxies port 80 to the orchestrator)
