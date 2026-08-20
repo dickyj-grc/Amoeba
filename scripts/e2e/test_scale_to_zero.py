@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import time
-
 import requests
 
-from conftest import auth_header
+from conftest import auth_header, wait_for_container_stopped
 
 
 def test_proxy_responds_and_container_stops(base_url: str, admin_token: str, ssh) -> None:
@@ -25,11 +23,7 @@ def test_proxy_responds_and_container_stops(base_url: str, admin_token: str, ssh
     out = ssh.run("docker ps --filter name=amoeba-hello-world --format '{{.Names}}'")
     assert "amoeba-hello-world" in out, "Container should be running after request"
 
-    # Wait for cooldown (30s in the cloud-init services.json)
-    print("Waiting 45s for cooldown...")
-    time.sleep(45)
-
-    # Verify container stopped
-    out = ssh.run("docker ps --filter name=amoeba-hello-world --format '{{.Names}}'")
-    assert "amoeba-hello-world" not in out, "Container should have stopped after cooldown"
+    # Wait for cooldown (30s) + reaper sweep (10s) + docker stop
+    print("Waiting for hello-world to scale to zero after cooldown...")
+    wait_for_container_stopped(ssh, "amoeba-hello-world")
     print("Container scaled to zero as expected")

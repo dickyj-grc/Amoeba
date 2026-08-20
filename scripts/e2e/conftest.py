@@ -187,6 +187,29 @@ def wait_for_amoeba(ip: str, timeout: int = 300) -> None:
     raise RuntimeError("Timed out waiting for Amoeba")
 
 
+def wait_for_container_stopped(
+    ssh: SshClient,
+    container_name: str,
+    timeout_seconds: int = 90,
+) -> None:
+    """Poll until a container is no longer running.
+
+    Cooldown + reaper sweep (10s) + docker stop can exceed a fixed sleep on
+    busy droplets, so poll instead of sleeping once.
+    """
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        out = ssh.run(f"docker ps --filter name={container_name} --format '{{{{.Names}}}}'")
+        if container_name not in out:
+            print(f"Container '{container_name}' stopped")
+            return
+        time.sleep(5)
+    out = ssh.run(f"docker ps --filter name={container_name} --format '{{{{.Names}}}}'")
+    raise AssertionError(
+        f"container '{container_name}' should have stopped after cooldown, still running: {out!r}"
+    )
+
+
 def wait_for_app_ready(base_url: str, admin_token: str, app_name: str, timeout_seconds: int = 180) -> dict:
     """Poll the app status endpoint until it reaches ready or error."""
     deadline = time.time() + timeout_seconds
