@@ -8,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-from conftest import auth_header, wait_for_app_ready
+from conftest import auth_header, wait_for_app_ready, wait_for_container_stopped
 
 
 def _install_package(base_url: str, admin_token: str, package_dir: Path, app_name: str) -> None:
@@ -77,9 +77,6 @@ def test_scale_to_zero_after_stream(base_url: str, admin_token: str, ssh) -> Non
     out = ssh.run("docker ps --filter name=amoeba-streaming-echo --format '{{.Names}}'")
     assert "amoeba-streaming-echo" in out, "streaming-echo container should be running"
 
-    print("Waiting 45s for cooldown...")
-    time.sleep(45)
-
-    out = ssh.run("docker ps --filter name=amoeba-streaming-echo --format '{{.Names}}'")
-    assert "amoeba-streaming-echo" not in out, "streaming-echo container should have stopped after cooldown"
+    print("Waiting for streaming-echo to scale to zero after cooldown...")
+    wait_for_container_stopped(ssh, "amoeba-streaming-echo")
     print("streaming-echo scaled to zero as expected")
