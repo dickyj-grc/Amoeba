@@ -78,7 +78,8 @@ pub async fn login(
 }
 
 /// Revokes the JWT presented in the request. Requires a valid token with the
-/// "admin" role. The revocation is stored in memory only and is lost on restart.
+/// "admin" role. The revocation is persisted (default `/etc/amoeba/revoked_tokens.json`)
+/// so it survives process restarts.
 pub async fn revoke(
     State(state): State<Arc<AppState>>,
     claims: axum::extract::Extension<Claims>,

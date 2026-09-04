@@ -7,7 +7,7 @@ pub mod revocation;
 pub mod users;
 
 use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
-use revocation::InMemoryRevocationStore;
+use revocation::RevocationStore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -36,7 +36,7 @@ pub enum AuthMode {
 pub struct JwtEngine {
     pub mode: AuthMode,
     pub validation: Validation,
-    pub revocation_store: Option<InMemoryRevocationStore>,
+    pub revocation_store: Option<RevocationStore>,
 }
 
 impl JwtEngine {
@@ -55,8 +55,18 @@ impl JwtEngine {
                 let keys = cached_keys.read().await;
                 let jwk = keys.find(&kid).ok_or("Key ID not found in JWKS cache")?;
 
+                // Restrict verification to the algorithm the key is actually
+                // advertised for, rather than accepting any algorithm the
+                // engine-wide validation list permits for this key's family.
+                let mut validation = self.validation.clone();
+                if let Some(alg) = jwk.common.key_algorithm {
+                    if let Ok(alg) = alg.to_string().parse::<jsonwebtoken::Algorithm>() {
+                        validation.algorithms = vec![alg];
+                    }
+                }
+
                 let decoding_key = DecodingKey::from_jwk(jwk).map_err(|e| e.to_string())?;
-                decode::<Claims>(token, &decoding_key, &self.validation)
+                decode::<Claims>(token, &decoding_key, &validation)
                     .map(|d| d.claims)
                     .map_err(|e| format!("JWKS validation failed: {}", e))?
             }

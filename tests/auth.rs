@@ -2,7 +2,7 @@
 
 use amoeba::auth::jwt::local_engine_with_revocation;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
-use amoeba::auth::revocation::InMemoryRevocationStore;
+use amoeba::auth::revocation::RevocationStore;
 use amoeba::auth::users::UserStore;
 use amoeba::routing::auth::{login, revoke};
 use amoeba::state::AppState;
@@ -43,7 +43,7 @@ fn seed_user(path: &str) {
 }
 
 fn build_app(users_file: &str) -> Router {
-    let revocation_store = InMemoryRevocationStore::new();
+    let revocation_store = RevocationStore::new();
     let jwt_engine = std::sync::Arc::new(local_engine_with_revocation(
         JWT_SECRET,
         revocation_store.clone(),

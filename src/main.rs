@@ -1,6 +1,12 @@
 use amoeba::auth::jwt::local_engine_with_revocation;
+use amoeba::auth::jwks::fetch_jwks;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
-use amoeba::auth::revocation::InMemoryRevocationStore;
+use amoeba::auth::revocation::RevocationStore;
+use amoeba::auth::{AuthMode, JwtEngine};
+use amoeba::config::settings::{
+    AmoebaConfig, AuthSettings, ServerSettings, AUTH_MODE_JWKS, AUTH_MODE_LOCAL_JWT,
+    DEFAULT_BIND_ADDR, DEFAULT_CONFIG_PATH, DEFAULT_REVOCATION_FILE, DEFAULT_USERS_FILE,
+};
 use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::apps_admin::{get_app_status, install_app, list_apps, uninstall_app};
 use amoeba::routing::auth::{login, revoke};
@@ -10,8 +16,21 @@ use axum::{
     Router, middleware,
     routing::{any, post},
 };
+use jsonwebtoken::{Algorithm, Validation};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tokio::sync::RwLock;
+use tracing::{error, info, warn};
+
+/// Algorithms accepted for tokens verified against a JWKS endpoint. The exact
+/// algorithm is further restricted per key (see `JwtEngine::verify_token`).
+const JWKS_ALGORITHMS: &[Algorithm] = &[
+    Algorithm::RS256,
+    Algorithm::RS384,
+    Algorithm::RS512,
+    Algorithm::ES256,
+    Algorithm::ES384,
+    Algorithm::EdDSA,
+];
 
 #[tokio::main]
 async fn main() {
@@ -21,21 +40,74 @@ async fn main() {
         .json()
         .init();
 
+    let config = match load_settings() {
+        Ok(config) => config,
+        Err(e) => {
+            error!("configuration error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let revocation_store = RevocationStore::persistent(&config.auth.revocation_file);
+
+    let mut validation = Validation::default();
+    if let Some(issuer) = &config.auth.issuer {
+        validation.set_issuer(&[issuer.clone()]);
+    }
+    if let Some(audience) = &config.auth.audience {
+        validation.set_audience(&[audience.clone()]);
+    }
+
     // Configure Authentication Mode
-    let jwt_secret = std::env::var("AMOEBA_LOCAL_JWT_SECRET").unwrap_or_else(|_| {
-        warn!("AMOEBA_LOCAL_JWT_SECRET not set; using an insecure default (do not use this in production)");
-        "super_secret_local_key_change_in_production".to_string()
-    });
-    let revocation_store = InMemoryRevocationStore::new();
-    let jwt_engine = Arc::new(local_engine_with_revocation(
-        jwt_secret,
-        revocation_store.clone(),
-    ));
+    let jwt_engine = match config.auth.mode.as_str() {
+        AUTH_MODE_LOCAL_JWT => {
+            let secret = match config.auth.resolve_jwt_secret() {
+                Ok(secret) => secret,
+                Err(e) => {
+                    error!("configuration error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut engine = local_engine_with_revocation(secret, revocation_store.clone());
+            engine.validation = validation;
+            Arc::new(engine)
+        }
+        AUTH_MODE_JWKS => {
+            let jwks_url = config
+                .auth
+                .jwks_url
+                .clone()
+                .expect("validated by AmoebaConfig::load");
+            let jwks = match fetch_jwks(&jwks_url).await {
+                Ok(jwks) => jwks,
+                Err(e) => {
+                    error!("configuration error: failed to load initial JWKS: {e}");
+                    std::process::exit(1);
+                }
+            };
+            info!("🔑 Loaded {} JWKS public key(s) from {jwks_url}", jwks.keys.len());
+
+            let cached_keys = Arc::new(RwLock::new(jwks));
+            amoeba::auth::jwks::start_jwks_refresh_daemon(jwks_url.clone(), cached_keys.clone());
+
+            let mut validation = validation;
+            validation.algorithms = JWKS_ALGORITHMS.to_vec();
+            Arc::new(JwtEngine {
+                mode: AuthMode::Jwks {
+                    jwks_url,
+                    cached_keys,
+                },
+                validation,
+                revocation_store: Some(revocation_store.clone()),
+            })
+        }
+        _ => unreachable!("AmoebaConfig::load rejects unknown auth modes"),
+    };
 
     // Initialize App State & Dynamic File Watchers
     let app_state = AppState::new(
         "/etc/amoeba/services.json",
-        "/etc/amoeba/users.json",
+        &config.auth.users_file,
         jwt_engine,
         Some(revocation_store),
     );
@@ -85,7 +157,46 @@ async fn main() {
         .nest("/auth", auth_routes)
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    info!("🚀 Amoeba Compute Orchestrator running on http://0.0.0.0:8080");
+    let bind_addr = config.server.bind_addr;
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    info!("🚀 Amoeba Compute Orchestrator running on http://{bind_addr}");
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Loads `config.toml` (path from `AMOEBA_CONFIG`, default
+/// `/etc/amoeba/config.toml`). When the file doesn't exist, falls back to
+/// legacy environment-based configuration: local JWT mode, the secret from
+/// `AMOEBA_LOCAL_JWT_SECRET`, fixed state paths, `0.0.0.0:8080`. That fallback
+/// still fails closed — a missing signing secret is a startup error, never a
+/// silent default.
+fn load_settings() -> Result<AmoebaConfig, String> {
+    let config_path =
+        std::env::var("AMOEBA_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+
+    if std::path::Path::new(&config_path).is_file() {
+        return AmoebaConfig::load(&config_path);
+    }
+
+    warn!("{config_path} not found; falling back to environment-based defaults (local_jwt mode, fixed paths)");
+    let jwt_secret = std::env::var("AMOEBA_LOCAL_JWT_SECRET").map_err(|_| {
+        "AMOEBA_LOCAL_JWT_SECRET is not set and no config file was found; \
+         refusing to start with an insecure default secret"
+            .to_string()
+    })?;
+
+    Ok(AmoebaConfig {
+        server: ServerSettings {
+            bind_addr: DEFAULT_BIND_ADDR.to_string(),
+            mode: None,
+        },
+        auth: AuthSettings {
+            mode: AUTH_MODE_LOCAL_JWT.to_string(),
+            issuer: None,
+            audience: None,
+            jwks_url: None,
+            jwt_secret: Some(jwt_secret),
+            users_file: DEFAULT_USERS_FILE.to_string(),
+            revocation_file: DEFAULT_REVOCATION_FILE.to_string(),
+        },
+    })
 }

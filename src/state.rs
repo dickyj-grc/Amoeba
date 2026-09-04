@@ -2,7 +2,7 @@
 
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
 use crate::auth::JwtEngine;
-use crate::auth::revocation::InMemoryRevocationStore;
+use crate::auth::revocation::RevocationStore;
 use crate::config::schema::ServiceCatalog;
 use crate::config::watcher::{load_catalog, spawn_file_watcher};
 use crate::lifecycle::container::ServiceRuntimeState;
@@ -25,7 +25,7 @@ pub struct AppState {
     pub app_states: ArcSwap<HashMap<String, Arc<AppLifecycleState>>>,
     pub drivers: ArcSwap<HashMap<String, Arc<ServiceDriver>>>,
     pub jwt_engine: Arc<JwtEngine>,
-    pub revocation_store: Option<InMemoryRevocationStore>,
+    pub revocation_store: Option<RevocationStore>,
     pub http_client: reqwest::Client,
     pub users_file: String,
     pub catalog_path: String,
@@ -36,7 +36,7 @@ impl AppState {
         config_path: &str,
         users_file: &str,
         jwt_engine: Arc<JwtEngine>,
-        revocation_store: Option<InMemoryRevocationStore>,
+        revocation_store: Option<RevocationStore>,
     ) -> Arc<Self> {
         let initial_catalog = load_catalog(config_path).unwrap_or_else(|_| ServiceCatalog {
             version: 1,

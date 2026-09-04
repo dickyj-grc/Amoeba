@@ -2,8 +2,26 @@
 
 use jsonwebtoken::jwk::JwkSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::info;
+
+/// Fetches a JWKS document from `url` and parses it into a key set.
+pub async fn fetch_jwks(url: &str) -> Result<JwkSet, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to fetch JWKS from {url}: {e}"))?;
+    response
+        .json::<JwkSet>()
+        .await
+        .map_err(|e| format!("JWKS response from {url} is not valid JWKS JSON: {e}"))
+}
 
 /// Replaces the cached JWKS key set with `new_keys`.
 pub async fn store_jwks(cache: &RwLock<JwkSet>, new_keys: JwkSet) {
@@ -14,15 +32,12 @@ pub async fn store_jwks(cache: &RwLock<JwkSet>, new_keys: JwkSet) {
 /// Background task that refreshes JWKS public keys periodically.
 pub fn start_jwks_refresh_daemon(jwks_url: String, cache: Arc<RwLock<JwkSet>>) {
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
         loop {
-            if let Ok(response) = client.get(&jwks_url).send().await {
-                if let Ok(jwks) = response.json::<JwkSet>().await {
-                    store_jwks(&cache, jwks).await;
-                    info!("🔑 Successfully updated JWKS public key cache.");
-                }
+            if let Ok(jwks) = fetch_jwks(&jwks_url).await {
+                store_jwks(&cache, jwks).await;
+                info!("🔑 Successfully updated JWKS public key cache.");
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
 }

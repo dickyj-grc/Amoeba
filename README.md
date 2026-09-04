@@ -316,8 +316,11 @@ audience = "amoeba-compute"
 # Required only if mode = "local_jwt"
 jwt_secret = "env:AMOEBA_LOCAL_JWT_SECRET"
 users_file = "/etc/amoeba/users.json"
+revocation_file = "/etc/amoeba/revoked_tokens.json"
 
 ```
+
+The server reads this file from `$AMOEBA_CONFIG` (default `/etc/amoeba/config.toml`) once at startup. Startup fails closed: if `auth.jwt_secret = "env:VAR_NAME"` references an unset variable (or the config file is absent and `AMOEBA_LOCAL_JWT_SECRET` is unset), the process exits with an error rather than falling back to a known default secret. If no config file exists at all, Amoeba falls back to legacy environment-based configuration (`local_jwt` mode, fixed paths, `0.0.0.0:8080`).
 
 ---
 
@@ -700,7 +703,7 @@ curl -X POST https://compute.yourdomain.com/auth/revoke \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Revocation is stored in memory only and is lost when the process restarts. After restart, every caller must log in again.
+Revocations are persisted to `revocation_file` (default `/etc/amoeba/revoked_tokens.json`, settable in `config.toml`) and survive process restarts: a revoked token stays rejected until it naturally expires, even if the server restarts with the same signing secret. Unrevoked tokens remain valid across a restart.
 
 ### 6.6 Choosing Between User Management Paths
 

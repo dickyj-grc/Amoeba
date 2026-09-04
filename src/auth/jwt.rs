@@ -1,6 +1,6 @@
 //! Local HMAC JWT issuing and verification (standalone/offline mode).
 
-use super::revocation::InMemoryRevocationStore;
+use super::revocation::RevocationStore;
 use super::{AuthMode, Claims, JwtEngine};
 use jsonwebtoken::{EncodingKey, Header, Validation, encode};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,10 +16,10 @@ pub fn local_engine(secret: impl Into<Vec<u8>>) -> JwtEngine {
     }
 }
 
-/// Builds a local HMAC engine with an in-memory revocation store.
+/// Builds a local HMAC engine wired to a revocation store.
 pub fn local_engine_with_revocation(
     secret: impl Into<Vec<u8>>,
-    revocation_store: InMemoryRevocationStore,
+    revocation_store: RevocationStore,
 ) -> JwtEngine {
     JwtEngine {
         mode: AuthMode::LocalJwt {

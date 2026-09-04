@@ -12,3 +12,6 @@ audience = "amoeba-compute"
 # Required only if mode = "local_jwt"
 jwt_secret = "env:AMOEBA_LOCAL_JWT_SECRET"
 users_file = "/etc/amoeba/users.json"
+
+# Revoked token IDs (jti) are persisted here so revocations survive restarts.
+revocation_file = "/etc/amoeba/revoked_tokens.json"
