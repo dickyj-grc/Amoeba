@@ -45,6 +45,51 @@ jobs:
           AMOEBA_AGE_SECRET_KEY: ${{ secrets.AMOEBA_AGE_SECRET_KEY }}
         run: python scripts/e2e-do.py --html=report.html --self-contained-html
 
+      # Belt-and-braces cleanup: the e2e fixture destroys its droplet in teardown,
+      # but that output is invisible on successful runs and a teardown failure
+      # (network flake, runner kill) leaks a metered droplet. This sweep always
+      # runs and deletes every droplet tagged amoeba-e2e, covering leaks from
+      # previous failed runs too.
+      - name: Sweep leftover e2e droplets
+        if: always()
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          import requests
+
+          API = "https://api.digitalocean.com/v2"
+          headers = {"Authorization": f"Bearer {os.environ['DIGITALOCEAN_TOKEN']}"}
+
+          try:
+              url = f"{API}/droplets"
+              droplets = []
+              while url:
+                  resp = requests.get(url, params={"tag_name": "amoeba-e2e"}, headers=headers, timeout=30)
+                  resp.raise_for_status()
+                  body = resp.json()
+                  droplets.extend(body.get("droplets", []))
+                  url = (body.get("links") or {}).get("pages", {}).get("next")
+          except requests.RequestException as e:
+              print(f"Could not list droplets, skipping sweep: {e}")
+              sys.exit(0)
+
+          if not droplets:
+              print("No leftover e2e droplets")
+              sys.exit(0)
+
+          for d in droplets:
+              try:
+                  r = requests.delete(f"{API}/droplets/{d['id']}", headers=headers, timeout=30)
+                  status = "deleted" if r.status_code == 204 else f"unexpected {r.status_code}: {r.text}"
+              except requests.RequestException as e:
+                  status = f"delete failed: {e}"
+              print(f"Droplet {d['id']} ({d['name']}): {status}")
+          PY
+
       - name: Upload e2e report
         if: always()
         uses: actions/upload-artifact@v7
