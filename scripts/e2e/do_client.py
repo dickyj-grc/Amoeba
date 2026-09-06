@@ -118,9 +118,28 @@ class DigitalOceanClient:
         raise RuntimeError("Timed out waiting for droplet to become active")
 
     def destroy_droplet(self, droplet_id: int) -> None:
-        """Delete the droplet."""
-        resp = self.session.delete(f"{DO_API}/droplets/{droplet_id}")
-        if resp.status_code == 204:
-            print(f"Destroyed droplet {droplet_id}")
-        else:
-            print(f"Failed to destroy droplet {droplet_id}: {resp.status_code} {resp.text}")
+        """Delete the droplet, retrying transient API/network failures.
+
+        Called from the fixture's `finally` block, so it must never raise:
+        a single network flake would otherwise mask the real test failure
+        and leave the metered droplet running.
+        """
+        for attempt in range(3):
+            try:
+                resp = self.session.delete(f"{DO_API}/droplets/{droplet_id}", timeout=30)
+            except requests.RequestException as e:
+                print(f"Destroy attempt {attempt + 1}/3 for droplet {droplet_id} failed: {e}")
+                time.sleep(5 * (attempt + 1))
+                continue
+            if resp.status_code == 204:
+                print(f"Destroyed droplet {droplet_id}")
+                return
+            print(
+                f"Destroy attempt {attempt + 1}/3 for droplet {droplet_id} "
+                f"returned {resp.status_code}: {resp.text}"
+            )
+            time.sleep(5 * (attempt + 1))
+        print(
+            f"WARNING: could not destroy droplet {droplet_id} after 3 attempts; "
+            "delete it manually in the DigitalOcean console to stop billing."
+        )

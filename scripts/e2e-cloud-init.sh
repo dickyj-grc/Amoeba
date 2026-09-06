@@ -28,9 +28,21 @@ AGE_SECRET="${AMOEBA_AGE_SECRET_KEY:-}"
 mkdir -p /etc/amoeba/secrets
 chmod 700 /etc/amoeba/secrets
 
-# Place config files in the directory mounted into the Amoeba container
+# Place config files in the directory mounted into the Amoeba container.
+# Write a local_jwt config directly instead of copying config/config.example.toml:
+# the example defaults to JWKS mode with a placeholder URL, which makes the
+# orchestrator exit on startup (unreachable JWKS) and crash-loop.
 mkdir -p /opt/amoeba/config
-cp config/config.example.toml /opt/amoeba/config/config.toml
+cat > /opt/amoeba/config/config.toml <<EOF
+[server]
+bind_addr = "0.0.0.0:8080"
+
+[auth]
+mode = "local_jwt"
+jwt_secret = "env:AMOEBA_LOCAL_JWT_SECRET"
+users_file = "/etc/amoeba/users.json"
+revocation_file = "/etc/amoeba/revoked_tokens.json"
+EOF
 cp config/users.example.json /opt/amoeba/config/users.json
 
 # Start with an empty catalog; the e2e script installs apps via the admin API.
@@ -72,9 +84,11 @@ chmod 600 "$AMOEBA_DIR/.env"
 docker compose -f docker-compose.yml -f docker-compose.e2e.yml pull
 docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
 
-# Wait for Amoeba to be ready (Caddy proxies port 80 to the orchestrator)
+# Wait for Amoeba to be ready (Caddy proxies port 80 to the orchestrator).
+# -f is required: a bare curl exits 0 on HTTP 5xx (e.g. 502 while the
+# orchestrator is still starting), which would report "ready" prematurely.
 for i in $(seq 1 60); do
-    if curl -sS http://localhost/v1/health-check/ -o /dev/null 2>&1; then
+    if curl -fsS http://localhost/v1/health-check/ -o /dev/null 2>&1; then
         echo "Amoeba is ready"
         break
     fi
