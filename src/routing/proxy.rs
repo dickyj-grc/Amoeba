@@ -1,6 +1,6 @@
 //! Extracts service_name/subpath from the incoming path and dispatches upstream.
 
-use super::operation::{classify_operation, has_permission};
+use super::operation::{AccessDeny, authorize, classify_operation};
 use crate::apps::state::AppLifecycleState;
 use crate::auth::Claims;
 use crate::auth::middleware::verify_request_token;
@@ -72,6 +72,50 @@ pub fn apply_upstream_auth(
     }
 
     outbound_req
+}
+
+/// Headers the gateway itself owns. Client-supplied copies are dropped so a
+/// caller cannot pick their own org or secret.
+fn is_gateway_identity_header(name: &HeaderName) -> bool {
+    let lower = name.as_str().to_ascii_lowercase();
+    lower == "x-amoeba-org" || lower == "x-amoeba-user" || lower.starts_with("x-amoeba-secret-")
+}
+
+fn apply_caller_identity(
+    mut outbound_req: reqwest::RequestBuilder,
+    claims: Option<&Claims>,
+) -> reqwest::RequestBuilder {
+    let Some(claims) = claims else {
+        return outbound_req;
+    };
+    if let Some(org) = &claims.org_id {
+        outbound_req = outbound_req.header("x-amoeba-org", org);
+    }
+    outbound_req.header("x-amoeba-user", &claims.sub)
+}
+
+/// Header name the proxy uses for a secret injected per request.
+pub fn secret_header_name(key: &str) -> String {
+    format!("x-amoeba-secret-{}", key.to_ascii_lowercase())
+}
+
+fn apply_proxy_secrets(
+    mut outbound_req: reqwest::RequestBuilder,
+    service_cfg: &ServiceConfig,
+) -> Result<reqwest::RequestBuilder, String> {
+    if service_cfg.header_from_secret.is_empty() {
+        return Ok(outbound_req);
+    }
+    let resolved =
+        crate::lifecycle::driver::resolve_proxy_secrets(&service_cfg.header_from_secret)?;
+    for (key, value) in resolved {
+        let name = HeaderName::from_bytes(secret_header_name(&key).as_bytes())
+            .map_err(|e| format!("invalid secret header for '{key}': {e}"))?;
+        let value = HeaderValue::from_str(&value)
+            .map_err(|_| format!("secret '{key}' is not a valid header value"))?;
+        outbound_req = outbound_req.header(name, value);
+    }
+    Ok(outbound_req)
 }
 
 /// RAII guard that increments `active_connections` on creation and decrements
@@ -175,22 +219,23 @@ pub async fn proxy_handler(
     // 3. Classify Operation (HTTP Method -> Operation Name)
     let operation = classify_operation(req.method().as_str());
 
-    // 4. ACL Check: Evaluate Roles against Permissions Matrix (skipped for public services)
+    // 4. ACL Check. Public services skip this. Otherwise the service's access
+    // form (tenant-unaware, single-tenant, or per-org maps) selects the role list.
     if let Some(claims) = &claims {
-        let allowed_roles = service_cfg
-            .permissions
-            .get(operation)
-            .cloned()
-            .unwrap_or_default();
-
-        if !has_permission(claims, &allowed_roles) {
+        if let Err(deny) = authorize(service_cfg, claims, operation) {
             info!(
                 user = %claims.sub,
+                org = ?claims.org_id,
                 service = %service_name,
                 operation = %operation,
+                ?deny,
                 "⛔ Access denied (403 Forbidden)"
             );
-            return Err(StatusCode::FORBIDDEN);
+            let reason = match deny {
+                AccessDeny::Tenant => "tenant",
+                AccessDeny::Role => "role",
+            };
+            return Ok(rejection(StatusCode::FORBIDDEN, reason));
         }
     }
 
@@ -334,13 +379,31 @@ pub async fn proxy_handler(
     // by upstream_auth injection below). SSE/MCP clients need Accept,
     // Mcp-Session-Id, Last-Event-ID, etc. to reach the upstream.
     for (name, value) in req.headers() {
-        if !is_hop_by_hop(name) && name != HOST && name != AUTHORIZATION {
+        if !is_hop_by_hop(name)
+            && name != HOST
+            && name != AUTHORIZATION
+            && !is_gateway_identity_header(name)
+        {
             outbound_req = outbound_req.header(name, value);
         }
     }
 
+    // The caller's org and user come from the verified token, never from
+    // headers the client supplied (those were dropped above).
+    outbound_req = apply_caller_identity(outbound_req, claims.as_ref());
+
     // 7. Handle Upstream Token Translation / Credential Injection
     outbound_req = apply_upstream_auth(outbound_req, service_cfg);
+    outbound_req = match apply_proxy_secrets(outbound_req, service_cfg) {
+        Ok(req) => req,
+        Err(message) => {
+            error!(service = %service_name, "{message}");
+            return Ok(rejection(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "secret-unavailable",
+            ));
+        }
+    };
 
     // Forward Request Payload Body
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
@@ -420,16 +483,48 @@ mod tests {
             },
             container: Some(ContainerSpec {
                 image: "img".into(),
+                runtime: None,
                 resources: None,
                 env: HashMap::new(),
             }),
             stack_spec: None,
             operation_rules: None,
             permissions: HashMap::new(),
+            tenant: None,
+            tenant_permissions: None,
             upstream_auth,
             public: false,
             env_from_secret: HashMap::new(),
+            header_from_secret: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn caller_identity_comes_from_the_token() {
+        let claims = crate::auth::Claims {
+            sub: "analyst_user".into(),
+            org_id: Some("org_client_alpha".into()),
+            roles: vec!["analyst".into()],
+            exp: 0,
+            jti: "jti".into(),
+        };
+        let client = reqwest::Client::new();
+        let req = apply_caller_identity(client.get("http://127.0.0.1/x"), Some(&claims));
+        let built = req.build().unwrap();
+        assert_eq!(
+            built.headers().get("x-amoeba-org").unwrap(),
+            "org_client_alpha"
+        );
+        assert_eq!(
+            built.headers().get("x-amoeba-user").unwrap(),
+            "analyst_user"
+        );
+        assert!(is_gateway_identity_header(&HeaderName::from_static(
+            "x-amoeba-org"
+        )));
+        assert!(is_gateway_identity_header(&HeaderName::from_static(
+            "x-amoeba-secret-api_key"
+        )));
     }
 
     #[test]

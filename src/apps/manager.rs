@@ -4,7 +4,9 @@
 //! service catalog (`services.json`). Amoeba's file watcher then hot-reloads
 //! the new catalog without a process restart.
 
-use super::schema::{AppManifest, AppSpec, InstallValues, ResourceSpec};
+use super::schema::{
+    AppManifest, AppSpec, InstallValues, PolicyGrant, PolicyPatch, ResourceSpec, SecretInject,
+};
 use super::state::LifecycleStatus;
 use crate::config::schema::{
     ContainerResources, ContainerSpec, MachineConfig, Placement, ResourceQuantities,
@@ -37,6 +39,7 @@ pub enum AppManagerError {
     Validation(String),
     Command(String),
     Decrypt(String),
+    Quota(String),
 }
 
 impl std::fmt::Display for AppManagerError {
@@ -49,6 +52,7 @@ impl std::fmt::Display for AppManagerError {
             AppManagerError::Validation(msg) => write!(f, "validation error: {msg}"),
             AppManagerError::Command(msg) => write!(f, "command error: {msg}"),
             AppManagerError::Decrypt(msg) => write!(f, "decryption error: {msg}"),
+            AppManagerError::Quota(msg) => write!(f, "quota exceeded: {msg}"),
         }
     }
 }
@@ -195,6 +199,9 @@ impl AppManager {
         let mut catalog = load_catalog(&self.catalog_path)?;
         upsert_machine(&mut catalog);
         let service_config = build_service_config(&manifest, &values, &self.stacks_dir());
+        crate::config::watcher::validate_service_access(&app_name, &service_config)
+            .map_err(AppManagerError::Validation)?;
+        enforce_tenant_quota(&catalog, &app_name, &service_config)?;
         catalog.services.insert(app_name.clone(), service_config);
         save_catalog(&self.catalog_path, &catalog)?;
 
@@ -240,6 +247,34 @@ impl AppManager {
         let catalog = load_catalog(&self.catalog_path)?;
         Ok(catalog.services.keys().cloned().collect())
     }
+
+    /// Reads one service from the catalog on disk.
+    pub fn get_service(&self, app_name: &str) -> Result<ServiceConfig, AppManagerError> {
+        let catalog = load_catalog(&self.catalog_path)?;
+        catalog.services.get(app_name).cloned().ok_or_else(|| {
+            AppManagerError::Validation(format!("app '{app_name}' is not installed"))
+        })
+    }
+
+    /// Updates access policy and writes the catalog so the watcher hot-reloads it.
+    pub async fn update_policy(
+        &self,
+        app_name: &str,
+        patch: PolicyPatch,
+    ) -> Result<ServiceConfig, AppManagerError> {
+        let _guard = self.lock.lock().await;
+        let mut catalog = load_catalog(&self.catalog_path)?;
+        let service = catalog.services.get_mut(app_name).ok_or_else(|| {
+            AppManagerError::Validation(format!("app '{app_name}' is not installed"))
+        })?;
+        apply_policy_patch(service, &patch)?;
+        let updated = service.clone();
+        crate::config::watcher::validate_service_access(app_name, &updated)
+            .map_err(AppManagerError::Validation)?;
+        enforce_tenant_quota(&catalog, app_name, &updated)?;
+        save_catalog(&self.catalog_path, &catalog)?;
+        Ok(updated)
+    }
 }
 
 fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), AppManagerError> {
@@ -283,6 +318,22 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
     if manifest.placement.port == 0 {
         return Err(AppManagerError::Validation(
             "placement.port is required".to_string(),
+        ));
+    }
+
+    if manifest.public && (manifest.tenant.is_some() || manifest.tenant_permissions.is_some()) {
+        return Err(AppManagerError::Validation(
+            "a public app cannot also set tenant or tenant_permissions".into(),
+        ));
+    }
+    if manifest.tenant.is_some() && manifest.tenant_permissions.is_some() {
+        return Err(AppManagerError::Validation(
+            "set tenant or tenant_permissions, not both".into(),
+        ));
+    }
+    if manifest.tenant_permissions.is_some() && !manifest.permissions.is_empty() {
+        return Err(AppManagerError::Validation(
+            "tenant_permissions replaces permissions; omit permissions".into(),
         ));
     }
 
@@ -424,6 +475,7 @@ fn load_catalog(path: &Path) -> Result<ServiceCatalog, AppManagerError> {
             version: 1,
             machines: HashMap::new(),
             scheduling: None,
+            max_services_per_tenant: None,
             services: HashMap::new(),
         });
     }
@@ -481,12 +533,19 @@ fn build_service_config(
         machine: manifest.placement.machine.clone(),
     };
 
-    let env_from_secret: HashMap<String, String> = manifest
-        .schema
-        .secrets
-        .keys()
-        .map(|k| (k.clone(), format!("{}/{}", manifest.service_name(), k)))
-        .collect();
+    let mut env_from_secret = HashMap::new();
+    let mut header_from_secret = HashMap::new();
+    for (key, field) in &manifest.schema.secrets {
+        let secret_ref = format!("{}/{}", manifest.service_name(), key);
+        match field.inject {
+            SecretInject::Env => {
+                env_from_secret.insert(key.clone(), secret_ref);
+            }
+            SecretInject::Proxy => {
+                header_from_secret.insert(key.clone(), secret_ref);
+            }
+        }
+    }
 
     let container = match &manifest.app {
         AppSpec::Image { image } => {
@@ -502,6 +561,7 @@ fn build_service_config(
 
             Some(ContainerSpec {
                 image: image.clone(),
+                runtime: manifest.placement.runtime.clone(),
                 resources: manifest
                     .resources
                     .as_ref()
@@ -544,10 +604,13 @@ fn build_service_config(
         container,
         stack_spec,
         permissions: manifest.permissions.clone(),
+        tenant: manifest.tenant.clone(),
+        tenant_permissions: manifest.tenant_permissions.clone(),
         upstream_auth: None,
-        public: false,
+        public: manifest.public,
         operation_rules: None,
         env_from_secret,
+        header_from_secret,
     }
 }
 
@@ -697,8 +760,168 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
     });
 }
 
+fn orgs_of(service: &ServiceConfig) -> Vec<&str> {
+    if let Some(tenant) = service.tenant.as_deref() {
+        return vec![tenant];
+    }
+    if let Some(map) = &service.tenant_permissions {
+        let mut orgs: Vec<&str> = map.keys().map(String::as_str).collect();
+        orgs.sort_unstable();
+        return orgs;
+    }
+    Vec::new()
+}
+
+fn enforce_tenant_quota(
+    catalog: &ServiceCatalog,
+    name: &str,
+    service: &ServiceConfig,
+) -> Result<(), AppManagerError> {
+    let Some(max) = catalog.max_services_per_tenant else {
+        return Ok(());
+    };
+    for org in orgs_of(service) {
+        let others = catalog
+            .services
+            .iter()
+            .filter(|(other_name, other)| {
+                other_name.as_str() != name && orgs_of(other).contains(&org)
+            })
+            .count();
+        if others + 1 > max as usize {
+            return Err(AppManagerError::Quota(format!(
+                "tenant '{org}' already has {others} other service(s); the limit is {max}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_policy_patch(
+    service: &mut ServiceConfig,
+    patch: &PolicyPatch,
+) -> Result<(), AppManagerError> {
+    if patch.tenant.is_some() && patch.tenant_permissions.is_some() {
+        return Err(AppManagerError::Validation(
+            "set tenant or tenant_permissions, not both".into(),
+        ));
+    }
+    if patch.permissions.is_some() && patch.tenant_permissions.is_some() {
+        return Err(AppManagerError::Validation(
+            "tenant_permissions replaces permissions; omit permissions".into(),
+        ));
+    }
+
+    if let Some(by_org) = &patch.tenant_permissions {
+        service.tenant = None;
+        service.permissions.clear();
+        service.tenant_permissions = Some(by_org.clone());
+    } else if patch.clear_tenant_permissions {
+        service.tenant_permissions = None;
+    }
+
+    if let Some(tenant) = &patch.tenant {
+        service.tenant_permissions = None;
+        service.tenant = Some(tenant.clone());
+    } else if patch.clear_tenant {
+        service.tenant = None;
+    }
+
+    if let Some(permissions) = &patch.permissions {
+        service.permissions = permissions.clone();
+    }
+    if let Some(public) = patch.public {
+        service.public = public;
+    }
+    if let Some(grant) = &patch.grant {
+        edit_role(service, grant, true)?;
+    }
+    if let Some(revoke) = &patch.revoke {
+        edit_role(service, revoke, false)?;
+    }
+    Ok(())
+}
+
+fn edit_role(
+    service: &mut ServiceConfig,
+    grant: &PolicyGrant,
+    add: bool,
+) -> Result<(), AppManagerError> {
+    if grant.operation.is_empty() || grant.role.is_empty() {
+        return Err(AppManagerError::Validation(
+            "operation and role are required".into(),
+        ));
+    }
+
+    if service.tenant_permissions.is_some() {
+        let org = grant
+            .org
+            .as_deref()
+            .filter(|org| !org.is_empty())
+            .ok_or_else(|| {
+                AppManagerError::Validation(
+                    "org is required when the service uses tenant_permissions".into(),
+                )
+            })?;
+        let map = service
+            .tenant_permissions
+            .as_mut()
+            .and_then(|by_org| by_org.get_mut(org))
+            .ok_or_else(|| {
+                AppManagerError::Validation(format!("org '{org}' is not on this service"))
+            })?;
+        edit_role_list(map, &grant.operation, &grant.role, add);
+        return Ok(());
+    }
+
+    if let Some(tenant) = &service.tenant {
+        if let Some(org) = grant.org.as_deref().filter(|org| !org.is_empty()) {
+            if org != tenant {
+                return Err(AppManagerError::Validation(format!(
+                    "service is bound to tenant '{tenant}'"
+                )));
+            }
+        }
+    } else if grant.org.as_ref().is_some_and(|org| !org.is_empty()) {
+        return Err(AppManagerError::Validation(
+            "set tenant or tenant_permissions before granting a role to an org".into(),
+        ));
+    }
+
+    edit_role_list(&mut service.permissions, &grant.operation, &grant.role, add);
+    Ok(())
+}
+
+fn edit_role_list(map: &mut HashMap<String, Vec<String>>, operation: &str, role: &str, add: bool) {
+    let roles = map.entry(operation.to_string()).or_default();
+    if add {
+        if !roles.iter().any(|existing| existing == role) {
+            roles.push(role.to_string());
+        }
+    } else {
+        roles.retain(|existing| existing != role);
+    }
+}
+
+async fn local_image_present(image: &str) -> bool {
+    match Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+    {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
 async fn pull_images(service: &ServiceConfig) -> Result<(), AppManagerError> {
     if let Some(container) = &service.container {
+        if !crate::apps::deploy::should_pull_image(local_image_present(&container.image).await) {
+            return Ok(());
+        }
         let output = Command::new("docker")
             .args(["pull", &container.image])
             .stdin(Stdio::null())
@@ -942,5 +1165,169 @@ schema:
 
         let secret_file = temp_dir.path().join("secrets/encrypted-app/API_KEY");
         assert_eq!(fs::read_to_string(secret_file).unwrap(), "from-user");
+    }
+
+    #[tokio::test]
+    async fn proxy_secrets_are_not_injected_into_the_container_env() {
+        let manifest = r#"
+api_version: v1
+name: proxy-secret
+app:
+  type: image
+  image: hello-world:latest
+placement:
+  port: 8080
+  runtime: runsc
+tenant: org_client_alpha
+permissions:
+  read: [analyst]
+schema:
+  secrets:
+    API_KEY:
+      required: true
+      inject: proxy
+"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        manager
+            .install(
+                &package_zip_with_manifest(manifest),
+                InstallValues {
+                    secrets: HashMap::from([("API_KEY".into(), "hidden".into())]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let catalog = load_catalog(&catalog_path).unwrap();
+        let svc = catalog.services.get("proxy-secret").unwrap();
+        assert!(svc.env_from_secret.is_empty());
+        assert_eq!(
+            svc.header_from_secret.get("API_KEY").unwrap(),
+            "proxy-secret/API_KEY"
+        );
+        assert_eq!(svc.tenant.as_deref(), Some("org_client_alpha"));
+        assert_eq!(
+            svc.container.as_ref().unwrap().runtime.as_deref(),
+            Some("runsc")
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("secrets/proxy-secret/API_KEY")).unwrap(),
+            "hidden"
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_quota_counts_services_per_org() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let manifest = |name: &str| {
+            format!(
+                r#"
+api_version: v1
+name: {name}
+app:
+  type: image
+  image: hello-world:latest
+placement:
+  port: 8080
+tenant: org_client_alpha
+permissions:
+  read: [analyst]
+"#
+            )
+        };
+        manager
+            .install(
+                &package_zip_with_manifest(&manifest("one")),
+                InstallValues::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut catalog = load_catalog(&catalog_path).unwrap();
+        catalog.max_services_per_tenant = Some(1);
+        save_catalog(&catalog_path, &catalog).unwrap();
+
+        let err = manager
+            .install(
+                &package_zip_with_manifest(&manifest("two")),
+                InstallValues::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppManagerError::Quota(_)));
+
+        manager
+            .install(
+                &package_zip_with_manifest(&manifest("one")),
+                InstallValues::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn policy_patch_grants_a_role_inside_one_org() {
+        let manifest = r#"
+api_version: v1
+name: shared
+app:
+  type: image
+  image: hello-world:latest
+placement:
+  port: 8080
+tenant_permissions:
+  org_client_alpha:
+    read: [viewer]
+  org_client_beta:
+    read: [analyst]
+"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        manager
+            .install(
+                &package_zip_with_manifest(manifest),
+                InstallValues::default(),
+            )
+            .await
+            .unwrap();
+
+        manager
+            .update_policy(
+                "shared",
+                PolicyPatch {
+                    grant: Some(PolicyGrant {
+                        org: Some("org_client_alpha".into()),
+                        operation: "add".into(),
+                        role: "analyst".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let svc = manager.get_service("shared").unwrap();
+        let alpha = svc
+            .tenant_permissions
+            .as_ref()
+            .unwrap()
+            .get("org_client_alpha")
+            .unwrap();
+        assert_eq!(alpha.get("add").unwrap(), &vec!["analyst".to_string()]);
+        assert!(
+            svc.tenant_permissions
+                .as_ref()
+                .unwrap()
+                .get("org_client_beta")
+                .unwrap()
+                .get("add")
+                .is_none()
+        );
     }
 }

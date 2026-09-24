@@ -42,6 +42,7 @@ impl AppState {
             version: 1,
             machines: HashMap::new(),
             scheduling: None,
+            max_services_per_tenant: None,
             services: HashMap::new(),
         });
 

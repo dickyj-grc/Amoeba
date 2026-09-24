@@ -23,8 +23,21 @@ pub struct AppManifest {
     pub placement: PlacementSpec,
 
     /// Role-based permissions, keyed by operation.
+    /// Single-policy map. With `tenant`, this is the single-tenant form.
     #[serde(default)]
     pub permissions: HashMap<String, Vec<String>>,
+
+    /// Bind the single-policy map to one org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+
+    /// Per-org permission maps. Exclusive with `tenant` and `permissions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_permissions: Option<HashMap<String, HashMap<String, Vec<String>>>>,
+
+    /// Skip JWT checks. Cannot be combined with `tenant` or `tenant_permissions`.
+    #[serde(default)]
+    pub public: bool,
 
     /// Optional resource limits for capacity gating.
     #[serde(default)]
@@ -59,6 +72,11 @@ pub struct PlacementSpec {
     pub cooldown_seconds: Option<u64>,
     #[serde(default)]
     pub machine: Option<String>,
+    /// OCI runtime for the single-container driver (`runsc`, `kata-runtime`, …).
+    /// Unset uses the Docker daemon default. The named runtime must already be
+    /// installed on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// Resource footprint of the app while running.
@@ -111,6 +129,23 @@ pub struct SecretField {
     /// is written to Amoeba's secrets directory.
     #[serde(default)]
     pub file: Option<String>,
+    /// Where the running service receives the value. `env` puts it in the
+    /// container environment. `proxy` keeps it on the gateway and sends it as
+    /// `X-Amoeba-Secret-<key>` on each request, so the process never sees it
+    /// at rest in its own environment.
+    #[serde(default)]
+    pub inject: SecretInject,
+}
+
+/// How a secret is delivered to the service.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretInject {
+    /// Inject as a container environment variable at start.
+    #[default]
+    Env,
+    /// Inject as a request header at the proxy. Not placed in the container env.
+    Proxy,
 }
 
 fn default_string() -> String {
@@ -128,6 +163,40 @@ pub struct InstallValues {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub secrets: HashMap<String, String>,
+}
+
+/// One role grant or revoke against a service's access map.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PolicyGrant {
+    /// Required when the service uses `tenant_permissions`. Must match `tenant`
+    /// when the service is single-tenant.
+    #[serde(default)]
+    pub org: Option<String>,
+    pub operation: String,
+    pub role: String,
+}
+
+/// Partial update of a service's access policy. Structural fields replace the
+/// corresponding catalog values. `grant` / `revoke` then edit one role.
+/// The result is validated as a single access form before it is saved.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct PolicyPatch {
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub clear_tenant: bool,
+    #[serde(default)]
+    pub permissions: Option<HashMap<String, Vec<String>>>,
+    #[serde(default)]
+    pub tenant_permissions: Option<HashMap<String, HashMap<String, Vec<String>>>>,
+    #[serde(default)]
+    pub clear_tenant_permissions: bool,
+    #[serde(default)]
+    pub public: Option<bool>,
+    #[serde(default)]
+    pub grant: Option<PolicyGrant>,
+    #[serde(default)]
+    pub revoke: Option<PolicyGrant>,
 }
 
 impl AppManifest {

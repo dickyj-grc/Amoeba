@@ -1,6 +1,6 @@
 //! Filesystem watcher (notify) driving lock-free ArcSwap config reloads.
 
-use super::schema::ServiceCatalog;
+use super::schema::{ServiceCatalog, ServiceConfig};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::path::Path as FilePath;
 use tracing::{error, info};
@@ -40,6 +40,52 @@ fn validate_catalog(catalog: &ServiceCatalog) -> Result<(), String> {
     validate_placement_host(catalog)?;
     validate_placement_type(catalog)?;
     validate_driver_supported(catalog)?;
+    validate_access_mode(catalog)?;
+    Ok(())
+}
+
+/// A service picks one access form. `public` may still carry a `permissions`
+/// map (the proxy ignores it); it may not also bind a tenant.
+pub fn validate_service_access(name: &str, svc: &ServiceConfig) -> Result<(), String> {
+    let multi = svc.tenant_permissions.is_some();
+    let single = svc.tenant.is_some();
+    if multi && single {
+        return Err(format!(
+            "service '{name}' sets both tenant and tenant_permissions"
+        ));
+    }
+    if multi && !svc.permissions.is_empty() {
+        return Err(format!(
+            "service '{name}' sets both permissions and tenant_permissions"
+        ));
+    }
+    if let Some(tenant) = &svc.tenant {
+        if tenant.is_empty() {
+            return Err(format!("service '{name}' has an empty tenant"));
+        }
+    }
+    if let Some(by_org) = &svc.tenant_permissions {
+        if by_org.is_empty() {
+            return Err(format!(
+                "service '{name}' tenant_permissions must name at least one org"
+            ));
+        }
+        if by_org.keys().any(|org| org.is_empty()) {
+            return Err(format!("service '{name}' has an empty org id"));
+        }
+    }
+    if svc.public && (single || multi) {
+        return Err(format!(
+            "service '{name}' is public and also binds a tenant"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_access_mode(catalog: &ServiceCatalog) -> Result<(), String> {
+    for (name, svc) in &catalog.services {
+        validate_service_access(name, svc)?;
+    }
     Ok(())
 }
 

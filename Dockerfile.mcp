@@ -1,0 +1,31 @@
+# Build stage
+FROM rust:1.85-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+
+RUN cargo build --release --bin amoeba-mcp && \
+    cp target/release/amoeba-mcp /usr/local/bin/
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/amoeba-mcp /usr/local/bin/amoeba-mcp
+
+# The MCP server communicates over stdio, so no port is exposed.
+# It needs access to the Docker socket for builds and log access.
+# It talks to Amoeba over HTTP via AMOEBA_URL.
+
+ENV AMOEBA_URL=http://amoeba:8080
+ENV AMOEBA_BUILD_DIR=/tmp/amoeba-builds
+ENV AMOEBA_MCP_LOG=error
+
+ENTRYPOINT ["/usr/local/bin/amoeba-mcp"]
