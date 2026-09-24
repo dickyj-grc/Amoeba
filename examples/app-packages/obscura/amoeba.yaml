@@ -14,5 +14,15 @@ permissions:
   # operation -- read-only wouldn't be enough to call any MCP method at all.
   read: [admin, analyst]
   add: [admin, analyst]
+# Obscura refuses a non-loopback MCP bind unless this token is set, and
+# every MCP call must send it as Authorization: Bearer. The proxy attaches
+# that header from the secret; the caller's Amoeba JWT is not forwarded.
+upstream_auth:
+  type: bearer_static
+  token_secret: OBSCURA_MCP_TOKEN
 schema:
-  env: {}
+  secrets:
+    OBSCURA_MCP_TOKEN:
+      description: Bearer token for Obscura's MCP HTTP server (at least 32 bytes)
+      required: true
+      inject: env

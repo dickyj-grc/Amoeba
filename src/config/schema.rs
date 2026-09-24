@@ -6,8 +6,14 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UpstreamAuth {
     pub r#type: String, // "bearer_static" or "custom_header"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env_var: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_name: Option<String>,
+    /// Secret key, or `<service>/<key>` reference, resolved from the secrets
+    /// directory. At install a bare key is rewritten to `<service>/<key>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

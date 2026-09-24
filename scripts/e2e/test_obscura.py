@@ -9,8 +9,17 @@ import requests
 
 from conftest import auth_header, wait_for_app_ready
 
+# Obscura rejects a non-loopback bind when this is shorter than 32 bytes.
+OBSCURA_MCP_TOKEN = "e2e-obscura-mcp-token-0123456789ab"
 
-def _install_package(base_url: str, admin_token: str, package_dir: Path, app_name: str) -> None:
+
+def _install_package(
+    base_url: str,
+    admin_token: str,
+    package_dir: Path,
+    app_name: str,
+    values: str = "{}",
+) -> None:
     zip_path = Path(f"/tmp/{app_name}.amoeba.zip")
     os.system(f"cd {package_dir} && zip -r {zip_path} amoeba.yaml compose.yaml > /dev/null")
 
@@ -19,7 +28,7 @@ def _install_package(base_url: str, admin_token: str, package_dir: Path, app_nam
             f"{base_url}/admin/apps",
             headers=auth_header(admin_token),
             files={"package": (f"{app_name}.amoeba.zip", f, "application/zip")},
-            data={"values": "{}"},
+            data={"values": values},
             timeout=30,
         )
     resp.raise_for_status()
@@ -57,7 +66,13 @@ def _tool_text(result: dict) -> str:
 def test_obscura_install_and_mcp_endpoint(base_url: str, admin_token: str) -> None:
     """Install Obscura and verify its MCP endpoint is reachable through Amoeba."""
     package_dir = Path(__file__).parent.parent.parent / "examples" / "app-packages" / "obscura"
-    _install_package(base_url, admin_token, package_dir, "obscura")
+    _install_package(
+        base_url,
+        admin_token,
+        package_dir,
+        "obscura",
+        values='{"secrets":{"OBSCURA_MCP_TOKEN":"%s"}}' % OBSCURA_MCP_TOKEN,
+    )
     wait_for_app_ready(base_url, admin_token, "obscura", timeout_seconds=300)
 
     result = _mcp_call(

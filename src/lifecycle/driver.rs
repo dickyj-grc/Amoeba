@@ -44,6 +44,18 @@ pub fn resolve_proxy_secrets(
     resolve_secret_map(Path::new(&secrets_dir()), header_from_secret)
 }
 
+/// Reads one secret file (`<secrets_dir>/<secret_ref>`) and trims trailing whitespace.
+pub fn resolve_secret_value(secret_ref: &str) -> Result<String, String> {
+    let path = Path::new(&secrets_dir()).join(secret_ref);
+    let value = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "failed to resolve secret '{secret_ref}' at {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(value.trim_end().to_string())
+}
+
 fn resolve_secret_map(
     dir: &Path,
     secrets: &HashMap<String, String>,

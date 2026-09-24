@@ -45,33 +45,44 @@ fn rejection(status: StatusCode, reason: &'static str) -> Response {
 pub fn apply_upstream_auth(
     mut outbound_req: reqwest::RequestBuilder,
     service_cfg: &ServiceConfig,
-) -> reqwest::RequestBuilder {
+) -> Result<reqwest::RequestBuilder, String> {
     let Some(auth_cfg) = &service_cfg.upstream_auth else {
-        return outbound_req;
+        return Ok(outbound_req);
     };
 
     match auth_cfg.r#type.as_str() {
         "bearer_static" => {
-            if let Some(env_var) = &auth_cfg.token_env_var {
-                let token = std::env::var(env_var).unwrap_or_default();
-                outbound_req = outbound_req.header(AUTHORIZATION, format!("Bearer {token}"));
-            }
+            let token = upstream_credential(auth_cfg)?;
+            outbound_req = outbound_req.header(AUTHORIZATION, format!("Bearer {token}"));
         }
         "custom_header" => {
-            if let (Some(hdr), Some(env_var)) = (&auth_cfg.header_name, &auth_cfg.token_env_var) {
-                let val = std::env::var(env_var).unwrap_or_default();
-                if let (Ok(name), Ok(value)) = (
-                    HeaderName::from_bytes(hdr.as_bytes()),
-                    HeaderValue::from_str(&val),
-                ) {
-                    outbound_req = outbound_req.header(name, value);
-                }
-            }
+            let Some(hdr) = &auth_cfg.header_name else {
+                return Err("custom_header upstream auth is missing header_name".into());
+            };
+            let val = upstream_credential(auth_cfg)?;
+            let name = HeaderName::from_bytes(hdr.as_bytes())
+                .map_err(|e| format!("invalid upstream auth header '{hdr}': {e}"))?;
+            let value = HeaderValue::from_str(&val)
+                .map_err(|_| format!("upstream auth secret is not a valid header value"))?;
+            outbound_req = outbound_req.header(name, value);
         }
-        _ => {}
+        other => {
+            return Err(format!("unknown upstream auth type '{other}'"));
+        }
     }
 
-    outbound_req
+    Ok(outbound_req)
+}
+
+fn upstream_credential(auth_cfg: &crate::config::schema::UpstreamAuth) -> Result<String, String> {
+    if let Some(secret_ref) = &auth_cfg.token_secret {
+        return crate::lifecycle::driver::resolve_secret_value(secret_ref);
+    }
+    if let Some(env_var) = &auth_cfg.token_env_var {
+        return std::env::var(env_var)
+            .map_err(|_| format!("environment variable '{env_var}' (upstream auth) is not set"));
+    }
+    Err("upstream auth needs token_secret or token_env_var".into())
 }
 
 /// Headers the gateway itself owns. Client-supplied copies are dropped so a
@@ -393,7 +404,16 @@ pub async fn proxy_handler(
     outbound_req = apply_caller_identity(outbound_req, claims.as_ref());
 
     // 7. Handle Upstream Token Translation / Credential Injection
-    outbound_req = apply_upstream_auth(outbound_req, service_cfg);
+    outbound_req = match apply_upstream_auth(outbound_req, service_cfg) {
+        Ok(req) => req,
+        Err(message) => {
+            error!(service = %service_name, "{message}");
+            return Ok(rejection(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "secret-unavailable",
+            ));
+        }
+    };
     outbound_req = match apply_proxy_secrets(outbound_req, service_cfg) {
         Ok(req) => req,
         Err(message) => {
@@ -539,7 +559,7 @@ mod tests {
     fn leaves_request_untouched_without_upstream_auth() {
         let cfg = base_service_cfg(None);
         let client = reqwest::Client::new();
-        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
+        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).unwrap();
         let built = req.build().unwrap();
         assert!(built.headers().get(AUTHORIZATION).is_none());
     }
@@ -551,10 +571,11 @@ mod tests {
             r#type: "bearer_static".into(),
             token_env_var: Some("AMOEBA_TEST_UPSTREAM_TOKEN".into()),
             header_name: None,
+            token_secret: None,
         }));
 
         let client = reqwest::Client::new();
-        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
+        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).unwrap();
         let built = req.build().unwrap();
 
         assert_eq!(
@@ -570,10 +591,11 @@ mod tests {
             r#type: "custom_header".into(),
             token_env_var: Some("AMOEBA_TEST_UPSTREAM_HEADER_TOKEN".into()),
             header_name: Some("X-Internal-Key".into()),
+            token_secret: None,
         }));
 
         let client = reqwest::Client::new();
-        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
+        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).unwrap();
         let built = req.build().unwrap();
 
         assert_eq!(

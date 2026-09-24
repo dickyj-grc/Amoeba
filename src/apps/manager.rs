@@ -336,6 +336,34 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
             "tenant_permissions replaces permissions; omit permissions".into(),
         ));
     }
+    if let Some(auth) = &manifest.upstream_auth {
+        match auth.r#type.as_str() {
+            "bearer_static" | "custom_header" => {}
+            other => {
+                return Err(AppManagerError::Validation(format!(
+                    "unknown upstream_auth type '{other}'"
+                )));
+            }
+        }
+        if auth.r#type == "custom_header" && auth.header_name.as_deref().is_none_or(str::is_empty) {
+            return Err(AppManagerError::Validation(
+                "custom_header upstream_auth requires header_name".into(),
+            ));
+        }
+        if auth.token_secret.is_none() && auth.token_env_var.is_none() {
+            return Err(AppManagerError::Validation(
+                "upstream_auth requires token_secret or token_env_var".into(),
+            ));
+        }
+        if let Some(secret) = &auth.token_secret {
+            let key = secret.rsplit('/').next().unwrap_or(secret);
+            if !secret.contains('/') && !manifest.schema.secrets.contains_key(key) {
+                return Err(AppManagerError::Validation(format!(
+                    "upstream_auth token_secret '{secret}' is not declared in schema.secrets"
+                )));
+            }
+        }
+    }
 
     if let Some(resources) = &manifest.resources {
         if let Some(memory) = &resources.memory {
@@ -599,6 +627,15 @@ fn build_service_config(
         AppSpec::Image { .. } => None,
     };
 
+    let mut upstream_auth = manifest.upstream_auth.clone();
+    if let Some(auth) = upstream_auth.as_mut() {
+        if let Some(secret) = auth.token_secret.as_mut() {
+            if !secret.contains('/') {
+                *secret = format!("{}/{}", manifest.service_name(), secret);
+            }
+        }
+    }
+
     ServiceConfig {
         placement,
         container,
@@ -606,7 +643,7 @@ fn build_service_config(
         permissions: manifest.permissions.clone(),
         tenant: manifest.tenant.clone(),
         tenant_permissions: manifest.tenant_permissions.clone(),
-        upstream_auth: None,
+        upstream_auth,
         public: manifest.public,
         operation_rules: None,
         env_from_secret,
@@ -1216,6 +1253,60 @@ schema:
         assert_eq!(
             fs::read_to_string(temp_dir.path().join("secrets/proxy-secret/API_KEY")).unwrap(),
             "hidden"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_secret_is_stored_as_a_service_reference() {
+        let manifest = r#"
+api_version: v1
+name: obscura
+app:
+  type: image
+  image: hello-world:latest
+placement:
+  port: 3000
+permissions:
+  read: [admin]
+upstream_auth:
+  type: bearer_static
+  token_secret: OBSCURA_MCP_TOKEN
+schema:
+  secrets:
+    OBSCURA_MCP_TOKEN:
+      required: true
+      inject: env
+"#;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let token = "e2e-obscura-mcp-token-0123456789ab";
+        manager
+            .install(
+                &package_zip_with_manifest(manifest),
+                InstallValues {
+                    secrets: HashMap::from([("OBSCURA_MCP_TOKEN".into(), token.into())]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let catalog = load_catalog(&catalog_path).unwrap();
+        let svc = catalog.services.get("obscura").unwrap();
+        let auth = svc.upstream_auth.as_ref().unwrap();
+        assert_eq!(auth.r#type, "bearer_static");
+        assert_eq!(
+            auth.token_secret.as_deref(),
+            Some("obscura/OBSCURA_MCP_TOKEN")
+        );
+        assert_eq!(
+            svc.env_from_secret.get("OBSCURA_MCP_TOKEN").unwrap(),
+            "obscura/OBSCURA_MCP_TOKEN"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("secrets/obscura/OBSCURA_MCP_TOKEN")).unwrap(),
+            token
         );
     }
 

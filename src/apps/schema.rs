@@ -39,6 +39,11 @@ pub struct AppManifest {
     #[serde(default)]
     pub public: bool,
 
+    /// Credential the proxy attaches when calling this app. The caller's JWT
+    /// is still removed first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_auth: Option<crate::config::schema::UpstreamAuth>,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,
