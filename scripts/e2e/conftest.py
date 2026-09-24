@@ -248,12 +248,13 @@ def create_user(
     username: str,
     password: str,
     roles: list[str],
+    org_id: str = "org_e2e",
 ) -> None:
     """Create a user via the admin API."""
     resp = requests.post(
         f"{base_url}/admin/users",
         headers={"Authorization": f"Bearer {admin_token}"},
-        json={"username": username, "password": password, "roles": roles, "org_id": "org_e2e"},
+        json={"username": username, "password": password, "roles": roles, "org_id": org_id},
         timeout=10,
     )
     resp.raise_for_status()

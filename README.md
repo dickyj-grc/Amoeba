@@ -857,7 +857,7 @@ A Python orchestrator spins up a DigitalOcean droplet, installs Caddy and Amoeba
   - `conftest.py` — droplet provisioning, login tokens, and helpers
   - `do_client.py` — DigitalOcean API client
   - `ssh_client.py` — paramiko wrapper
-  - `test_admin_apps.py`, `test_rbac.py`, `test_errors.py`, `test_scale_to_zero.py` — test cases
+  - `test_admin_apps.py`, `test_rbac.py`, `test_tenants.py`, `test_errors.py`, `test_scale_to_zero.py` — test cases
 - `scripts/e2e-cloud-init.sh` — cloud-init user-data that provisions the droplet
 - `.github/workflows/nightly-e2e.yml` — GitHub Actions schedule
 
