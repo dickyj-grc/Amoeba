@@ -177,6 +177,11 @@ pub struct Placement {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ContainerSpec {
     pub image: String,
+    /// OCI runtime passed to Docker (`HostConfig.runtime`). `None` uses the
+    /// daemon default (`runc`). Set `runsc` for gVisor, or a Kata/Firecracker
+    /// runtime name, only when that runtime is installed on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     /// Resources this service consumes while running (its footprint, not a
     /// per-request cost). Omitting `resources` entirely means it requests
     /// nothing on any dimension, exempting it from capacity accounting.
@@ -281,8 +286,20 @@ pub struct ServiceConfig {
     pub stack_spec: Option<StackSpec>,
     /// operation -> roles allowed to perform it. Missing/empty means no role is
     /// granted access (fails closed) unless `public` is set.
+    ///
+    /// This is the single-policy map. Together with `tenant` it is the
+    /// single-tenant form. Omit both `tenant` and `tenant_permissions` to keep
+    /// the historical behavior: any org with a listed role may call.
     #[serde(default)]
     pub permissions: HashMap<String, Vec<String>>,
+    /// When set, only this org may call, using `permissions`. Mutually
+    /// exclusive with `tenant_permissions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Per-org permission maps. Each entry is a complete policy for that org
+    /// (operation -> roles). Mutually exclusive with `tenant` and `permissions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_permissions: Option<HashMap<String, HashMap<String, Vec<String>>>>,
     pub upstream_auth: Option<UpstreamAuth>,
     /// Skips JWT verification and the permission check entirely for this service
     /// when true. Defaults to false: auth is required unless explicitly opted out.
@@ -297,6 +314,11 @@ pub struct ServiceConfig {
     /// compose file or in this config.
     #[serde(default)]
     pub env_from_secret: HashMap<String, String>,
+    /// Secret key -> `"<service>/<key>"` reference. The proxy reads the file
+    /// on each request and sets `X-Amoeba-Secret-<key>`. The value is not
+    /// placed in the container environment.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub header_from_secret: HashMap<String, String>,
 }
 
 impl ServiceConfig {
@@ -349,6 +371,10 @@ pub struct ServiceCatalog {
     /// ever one machine/driver.
     #[serde(default)]
     pub scheduling: Option<serde_json::Value>,
+    /// When set, an install is rejected once this many services already name
+    /// the same org via `tenant` or `tenant_permissions`. Unset means no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_services_per_tenant: Option<u32>,
     pub services: HashMap<String, ServiceConfig>,
 }
 

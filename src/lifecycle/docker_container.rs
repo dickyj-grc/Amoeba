@@ -25,6 +25,8 @@ pub struct DockerContainerDriver {
     image: String,
     network: String,
     memory_limit_bytes: Option<i64>,
+    /// OCI runtime name (`runsc`, `kata-runtime`, …). `None` leaves the daemon default.
+    runtime: Option<String>,
     /// Non-sensitive environment variables set at container creation time.
     env: HashMap<String, String>,
     env_from_secret: HashMap<String, String>,
@@ -37,6 +39,7 @@ impl DockerContainerDriver {
         image: String,
         network: String,
         memory_limit_mb: Option<u64>,
+        runtime: Option<String>,
         env: HashMap<String, String>,
         env_from_secret: HashMap<String, String>,
     ) -> Self {
@@ -46,6 +49,7 @@ impl DockerContainerDriver {
             image,
             network,
             memory_limit_bytes: memory_limit_mb.map(|mb| (mb * 1024 * 1024) as i64),
+            runtime,
             env,
             env_from_secret,
         }
@@ -94,6 +98,7 @@ impl DockerContainerDriver {
         let host_config = HostConfig {
             memory: self.memory_limit_bytes,
             network_mode: Some(self.network.clone()),
+            runtime: self.runtime.clone(),
             ..Default::default()
         };
         let config = Config {

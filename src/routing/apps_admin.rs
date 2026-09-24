@@ -3,8 +3,9 @@
 //! `/admin/users`.
 
 use crate::apps::manager::{AppManager, AppManagerError, spawn_readiness_probe};
-use crate::apps::schema::InstallValues;
+use crate::apps::schema::{InstallValues, PolicyPatch};
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
+use crate::routing::operation::scoped_role;
 use crate::state::AppState;
 use axum::{
     Json,
@@ -12,8 +13,9 @@ use axum::{
     extract::{Multipart, Path, State},
     http::StatusCode,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Response body returned after a successful install.
 #[derive(Serialize)]
@@ -143,6 +145,99 @@ pub async fn uninstall_app(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn update_app_policy(
+    State(state): State<Arc<AppState>>,
+    Path(app_name): Path<String>,
+    Json(patch): Json<PolicyPatch>,
+) -> Result<Json<AppStatusResponse>, (StatusCode, String)> {
+    let manager = app_manager(&state);
+    manager
+        .update_policy(&app_name, patch)
+        .await
+        .map_err(map_manager_error)?;
+
+    let snapshot = state
+        .app_state(&app_name)
+        .map(|s| s.snapshot())
+        .unwrap_or_else(|| AppLifecycleState::installed().snapshot());
+
+    Ok(Json(AppStatusResponse {
+        name: app_name,
+        state: snapshot,
+    }))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ServiceTokenRequest {
+    pub org_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ServiceTokenResponse {
+    pub token: String,
+    pub org_id: Option<String>,
+    pub role: String,
+}
+
+/// Mints a JWT whose only role is `mcp:<service>`. The service policy still
+/// has to grant that role; this does not widen access by itself.
+pub async fn issue_service_token(
+    State(state): State<Arc<AppState>>,
+    Path(app_name): Path<String>,
+    Json(body): Json<ServiceTokenRequest>,
+) -> Result<Json<ServiceTokenResponse>, (StatusCode, String)> {
+    let manager = app_manager(&state);
+    let service = manager.get_service(&app_name).map_err(map_manager_error)?;
+    let org_id = token_org(&service, body.org_id)?;
+    let role = scoped_role(&app_name);
+    let token = state
+        .jwt_engine
+        .issue_token(
+            &role,
+            org_id.as_deref(),
+            &[role.clone()],
+            Duration::from_secs(60 * 60),
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    Ok(Json(ServiceTokenResponse {
+        token,
+        org_id,
+        role,
+    }))
+}
+
+fn token_org(
+    service: &crate::config::schema::ServiceConfig,
+    requested: Option<String>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    if let Some(by_org) = &service.tenant_permissions {
+        let org = requested.ok_or((
+            StatusCode::BAD_REQUEST,
+            "org_id is required for a multi-tenant service".into(),
+        ))?;
+        if !by_org.contains_key(&org) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("org '{org}' is not on this service"),
+            ));
+        }
+        return Ok(Some(org));
+    }
+    if let Some(tenant) = &service.tenant {
+        if let Some(requested) = &requested {
+            if requested != tenant {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("service is bound to tenant '{tenant}'"),
+                ));
+            }
+        }
+        return Ok(Some(tenant.clone()));
+    }
+    Ok(requested)
+}
+
 fn app_manager(state: &AppState) -> AppManager {
     AppManager::new(&state.catalog_path)
 }
@@ -150,6 +245,7 @@ fn app_manager(state: &AppState) -> AppManager {
 fn map_manager_error(e: AppManagerError) -> (StatusCode, String) {
     match e {
         AppManagerError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
+        AppManagerError::Quota(msg) => (StatusCode::CONFLICT, msg),
         AppManagerError::Zip(_) | AppManagerError::Yaml(_) | AppManagerError::Json(_) => {
             (StatusCode::BAD_REQUEST, e.to_string())
         }

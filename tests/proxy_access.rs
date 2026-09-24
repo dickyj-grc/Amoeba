@@ -27,10 +27,10 @@ struct TestClaims {
     jti: String,
 }
 
-fn token_with_roles(roles: &[&str]) -> String {
+fn token_for(org: Option<&str>, roles: &[&str]) -> String {
     let claims = TestClaims {
         sub: "tester".into(),
-        org_id: None,
+        org_id: org.map(str::to_string),
         roles: roles.iter().map(|r| r.to_string()).collect(),
         exp: 9_999_999_999,
         jti: "test-jti".into(),
@@ -108,6 +108,17 @@ fn get_request(uri: &str, token: Option<&str>) -> Request<Body> {
         builder = builder.header(AUTHORIZATION, format!("Bearer {t}"));
     }
     builder.body(Body::empty()).unwrap()
+}
+
+fn token_with_roles(roles: &[&str]) -> String {
+    token_for(None, roles)
+}
+
+fn rejection_reason(res: axum::response::Response) -> Option<String> {
+    res.headers()
+        .get("x-amoeba-rejection-reason")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 #[tokio::test]
@@ -217,5 +228,106 @@ async fn unknown_service_is_not_found_regardless_of_auth() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn single_tenant_service_rejects_a_different_org() {
+    let path = temp_services_file("single-tenant");
+    write_catalog(
+        &path,
+        container_service(json!({
+            "tenant": "org_client_alpha",
+            "permissions": {"read": ["analyst"]}
+        })),
+    );
+
+    let app = build_app(&path);
+    let token = token_for(Some("org_client_beta"), &["analyst"]);
+    let res = app
+        .oneshot(get_request("/v1/svc/health", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejection_reason(res).as_deref(), Some("tenant"));
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn single_tenant_service_allows_the_bound_org() {
+    let path = temp_services_file("single-tenant-ok");
+    write_catalog(
+        &path,
+        container_service(json!({
+            "tenant": "org_client_alpha",
+            "permissions": {"read": ["analyst"]}
+        })),
+    );
+
+    let app = build_app(&path);
+    let token = token_for(Some("org_client_alpha"), &["analyst"]);
+    let res = app
+        .oneshot(get_request("/v1/svc/health", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn multi_tenant_service_uses_each_orgs_permissions() {
+    let path = temp_services_file("multi-tenant");
+    write_catalog(
+        &path,
+        container_service(json!({
+            "tenant_permissions": {
+                "org_client_alpha": {"read": ["viewer"], "add": ["analyst"]},
+                "org_client_beta": {"read": ["analyst"]}
+            }
+        })),
+    );
+
+    let app = build_app(&path);
+    let viewer = token_for(Some("org_client_beta"), &["viewer"]);
+    let res = app
+        .oneshot(get_request("/v1/svc/health", Some(&viewer)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejection_reason(res).as_deref(), Some("role"));
+
+    let app = build_app(&path);
+    let analyst = token_for(Some("org_client_beta"), &["analyst"]);
+    let res = app
+        .oneshot(get_request("/v1/svc/health", Some(&analyst)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let app = build_app(&path);
+    let admin = token_for(Some("org_client_beta"), &["admin"]);
+    let res = app
+        .oneshot(get_request("/v1/svc/health", Some(&admin)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejection_reason(res).as_deref(), Some("role"));
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn catalog_rejects_both_access_forms() {
+    let path = temp_services_file("both-forms");
+    write_catalog(
+        &path,
+        container_service(json!({
+            "tenant": "org_client_alpha",
+            "tenant_permissions": {"org_client_alpha": {"read": ["analyst"]}}
+        })),
+    );
+    assert!(amoeba::config::watcher::load_catalog(&path).is_err());
     std::fs::remove_file(&path).ok();
 }

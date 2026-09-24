@@ -32,15 +32,30 @@ fn secrets_dir() -> String {
 pub(super) fn resolve_env_from_secret(
     env_from_secret: &HashMap<String, String>,
 ) -> Result<Vec<(String, String)>, DriverError> {
-    let dir = secrets_dir();
-    let mut resolved = Vec::with_capacity(env_from_secret.len());
-    for (key, secret_ref) in env_from_secret {
-        let path = Path::new(&dir).join(secret_ref);
+    resolve_secret_map(Path::new(&secrets_dir()), env_from_secret).map_err(DriverError::Unavailable)
+}
+
+/// Reads proxy-injected secrets from the secrets directory. The returned
+/// pairs are `(secret key, plaintext)`. Values are trimmed and never logged
+/// by this function.
+pub fn resolve_proxy_secrets(
+    header_from_secret: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    resolve_secret_map(Path::new(&secrets_dir()), header_from_secret)
+}
+
+fn resolve_secret_map(
+    dir: &Path,
+    secrets: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut resolved = Vec::with_capacity(secrets.len());
+    for (key, secret_ref) in secrets {
+        let path = dir.join(secret_ref);
         let value = std::fs::read_to_string(&path).map_err(|e| {
-            DriverError::Unavailable(format!(
-                "failed to resolve secret '{secret_ref}' for env var '{key}' at {}: {e}",
+            format!(
+                "failed to resolve secret '{secret_ref}' for '{key}' at {}: {e}",
                 path.display()
-            ))
+            )
         })?;
         resolved.push((key.clone(), value.trim_end().to_string()));
     }
@@ -233,6 +248,7 @@ fn build_container_driver(
         container.image.clone(),
         network.to_string(),
         memory_limit_mb,
+        container.runtime.clone(),
         container.env.clone(),
         svc.env_from_secret.clone(),
     ))
@@ -243,4 +259,29 @@ fn generated_compose_path(config_dir: &Path, service_name: &str) -> PathBuf {
         .join("generated")
         .join(service_name)
         .join("compose.yml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_secret_is_read_from_the_secrets_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "amoeba-proxy-secret-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let secret_dir = dir.join("pdf");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("API_KEY"), "s3cret\n").unwrap();
+
+        let resolved = resolve_secret_map(
+            &dir,
+            &HashMap::from([("API_KEY".into(), "pdf/API_KEY".into())]),
+        )
+        .unwrap();
+        assert_eq!(resolved, vec![("API_KEY".into(), "s3cret".into())]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

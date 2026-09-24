@@ -1,14 +1,16 @@
-use amoeba::auth::jwt::local_engine_with_revocation;
 use amoeba::auth::jwks::fetch_jwks;
+use amoeba::auth::jwt::local_engine_with_revocation;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::auth::revocation::RevocationStore;
 use amoeba::auth::{AuthMode, JwtEngine};
 use amoeba::config::settings::{
-    AmoebaConfig, AuthSettings, ServerSettings, AUTH_MODE_JWKS, AUTH_MODE_LOCAL_JWT,
-    DEFAULT_BIND_ADDR, DEFAULT_CONFIG_PATH, DEFAULT_REVOCATION_FILE, DEFAULT_USERS_FILE,
+    AUTH_MODE_JWKS, AUTH_MODE_LOCAL_JWT, AmoebaConfig, AuthSettings, DEFAULT_BIND_ADDR,
+    DEFAULT_CONFIG_PATH, DEFAULT_REVOCATION_FILE, DEFAULT_USERS_FILE, ServerSettings,
 };
 use amoeba::routing::admin::{create_user, delete_user, update_user};
-use amoeba::routing::apps_admin::{get_app_status, install_app, list_apps, uninstall_app};
+use amoeba::routing::apps_admin::{
+    get_app_status, install_app, issue_service_token, list_apps, uninstall_app, update_app_policy,
+};
 use amoeba::routing::auth::{login, revoke};
 use amoeba::routing::proxy::{proxy_handler, proxy_handler_root};
 use amoeba::state::AppState;
@@ -85,7 +87,10 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            info!("🔑 Loaded {} JWKS public key(s) from {jwks_url}", jwks.keys.len());
+            info!(
+                "🔑 Loaded {} JWKS public key(s) from {jwks_url}",
+                jwks.keys.len()
+            );
 
             let cached_keys = Arc::new(RwLock::new(jwks));
             amoeba::auth::jwks::start_jwks_refresh_daemon(jwks_url.clone(), cached_keys.clone());
@@ -125,8 +130,11 @@ async fn main() {
         .route("/apps", post(install_app).get(list_apps))
         .route(
             "/apps/:name",
-            axum::routing::get(get_app_status).delete(uninstall_app),
+            axum::routing::get(get_app_status)
+                .patch(update_app_policy)
+                .delete(uninstall_app),
         )
+        .route("/apps/:name/token", post(issue_service_token))
         .route_layer(middleware::from_fn(require_admin_role))
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -177,7 +185,9 @@ fn load_settings() -> Result<AmoebaConfig, String> {
         return AmoebaConfig::load(&config_path);
     }
 
-    warn!("{config_path} not found; falling back to environment-based defaults (local_jwt mode, fixed paths)");
+    warn!(
+        "{config_path} not found; falling back to environment-based defaults (local_jwt mode, fixed paths)"
+    );
     let jwt_secret = std::env::var("AMOEBA_LOCAL_JWT_SECRET").map_err(|_| {
         "AMOEBA_LOCAL_JWT_SECRET is not set and no config file was found; \
          refusing to start with an insecure default secret"

@@ -7,6 +7,7 @@
 //! by materializing the package onto disk and updating Amoeba's service
 //! catalog (`services.json`), which Amoeba hot-reloads without a restart.
 
+pub mod deploy;
 pub mod manager;
 pub mod schema;
 pub mod state;

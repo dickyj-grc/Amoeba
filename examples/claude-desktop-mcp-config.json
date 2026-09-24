@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "amoeba": {
+      "command": "/path/to/amoeba/target/release/amoeba-mcp",
+      "env": {
+        "AMOEBA_URL": "http://localhost:8080",
+        "AMOEBA_TOKEN": "your-admin-jwt-token-here",
+        "AMOEBA_REGISTRY": "",
+        "AMOEBA_CATALOG_PATH": "/etc/amoeba/services.json",
+        "AMOEBA_BUILD_DIR": "/tmp/amoeba-builds",
+        "AMOEBA_MCP_LOG": "error"
+      }
+    }
+  }
+}
