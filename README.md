@@ -4,7 +4,9 @@
 <td>
 
 # Amoeba
-The Amoeba Compute Orchestrator is an edge-aware, scale-to-zero L7 application and compute gateway written in Rust (Axum). It manages the lifecycle of transient microservices (AI models, web scrapers, document parsers) and stateful application nodes, enforcing zero-trust authorization, usage metering, and capacity gating.
+Scale to zero. Zero trust. Zero egress.
+
+Amoeba is a self-hosted L7 gateway, written in Rust (Axum), for services that should not run, accept a caller, or reach the network on their own. It cold-starts a workload for a request, checks that caller against the catalog, and is the path that workload uses to reach anything else.
 
 > **New:** [amoeba-mcp](docs/mcp-server.md) — an MCP server that lets AI agents (Claude, ChatGPT, Gemini) deploy and manage microservices on Amoeba.
 
@@ -15,11 +17,19 @@ The Amoeba Compute Orchestrator is an edge-aware, scale-to-zero L7 application a
 
 ## System Architecture & Technical Specification
 
-The **Amoeba Compute Orchestrator (`amoeba`)** is an edge-aware, scale-to-zero L7 application and compute gateway written in Rust (Axum). It manages the lifecycle of transient microservices (AI models, web scrapers, document parsers) and stateful application nodes, enforcing zero-trust authorization, usage metering, and capacity gating.
-
 ---
 
 ## Why Amoeba?
+
+Three defaults. Each one is an absence until the catalog grants it.
+
+| | Absent until granted | What Amoeba does |
+|---|---|---|
+| **Scale to zero** | The process | A service is stopped while idle and started for a request. Cooldown, capacity, and the audit line are per service. |
+| **Zero trust** | The caller | An empty permission map denies every role. Access is one org, a separate map per org, or any org that holds a listed role. A scoped token is an ordinary role, not a bypass. |
+| **Zero egress** | The route out | A service has no public address of its own. Callers reach it at `/v1/<service>/...`. It can call out only to destinations its catalog lists; the credential for that destination stays on the proxy and is attached on the way out. |
+
+Treat the code inside the service as untrusted. Amoeba contains it: the process is absent while idle, the caller is denied until granted, and there is no route out unless the catalog names the destination. Every proxied call is logged with the caller, the org, the service, and the result.
 
 ### 1. Cut Energy and Infrastructure Costs
 Amoeba's scale-to-zero lifecycle means workloads are only running when they are actually being used.
@@ -55,10 +65,11 @@ Every proxied request emits a telemetry log containing the caller, organization,
 - The same logs form the basis for chargeback, debugging, and security auditing.
 
 ### 6. Secure Secrets and Upstream Credential Translation
-Amoeba keeps sensitive material out of your compose files and config while bridging different auth schemes between callers and backends.
+Credentials stay on the gateway. The service process does not need them in its image or its environment.
 
-- `env_from_secret` injects secrets from a protected directory at container-start time.
-- `upstream_auth` can replace the caller's JWT with a backend-specific static token or custom header before forwarding the request.
+- `inject: proxy` stores a secret on disk and sends it as a request header. It is left out of the container environment.
+- `upstream_auth` replaces the caller's JWT with a backend token. `token_secret` reads that token from the secrets directory; `token_env_var` reads it from the gateway environment.
+- `env_from_secret` remains for a value the process itself must see at start. Prefer the proxy for anything the service only needs in order to call another system.
 
 ### 7. Minimal, Self-Hosted, and Portable
 Amoeba is designed for environments where you want control without operational overhead.
