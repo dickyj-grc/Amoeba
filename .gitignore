@@ -5,3 +5,21 @@
 __pycache__/
 *.pyc
 .venv-e2e/
+
+# Local configuration & credentials
+config/users.json
+config/config.local.toml
+config/revoked_tokens.json
+*.local.toml
+*.local.json
+
+# Node / Web UI
+node_modules/
+web/node_modules/
+web/dist/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.eslintcache

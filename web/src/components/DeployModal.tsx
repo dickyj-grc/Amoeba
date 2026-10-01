@@ -1,0 +1,396 @@
+import React, { useState } from 'react';
+import {
+  Code,
+  FolderGit2,
+  Layers,
+  Plus,
+  Rocket,
+  Shield,
+  Trash,
+  X,
+} from 'lucide-react';
+
+interface DeployModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onDeploySuccess: () => void;
+}
+
+interface EnvPair {
+  key: string;
+  value: string;
+  isSecret: boolean;
+}
+
+export const DeployModal: React.FC<DeployModalProps> = ({
+  isOpen,
+  onClose,
+  onDeploySuccess,
+}) => {
+  const [activeTab, setActiveTab] = useState<'git' | 'dockerfile' | 'image'>('git');
+  const [name, setName] = useState('');
+  const [gitUrl, setGitUrl] = useState('');
+  const [dockerImage, setDockerImage] = useState('');
+  const [dockerfileContent, setDockerfileContent] = useState(
+    'FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nEXPOSE 8080\nCMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]'
+  );
+  const [port, setPort] = useState(8080);
+  const [cooldown, setCooldown] = useState(300);
+  const [isPublic, setIsPublic] = useState(true);
+  const [envPairs, setEnvPairs] = useState<EnvPair[]>([
+    { key: 'PORT', value: '8080', isSecret: false },
+  ]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!isOpen) return null;
+
+  const handleAddEnv = () => {
+    setEnvPairs([...envPairs, { key: '', value: '', isSecret: false }]);
+  };
+
+  const handleRemoveEnv = (index: number) => {
+    setEnvPairs(envPairs.filter((_, i) => i !== index));
+  };
+
+  const handleEnvChange = (index: number, field: 'key' | 'value' | 'isSecret', value: any) => {
+    const updated = [...envPairs];
+    updated[index] = { ...updated[index], [field]: value };
+    setEnvPairs(updated);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError('Service name is required');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+
+    const envMap: Record<string, string> = {};
+    const secretsMap: Record<string, string> = {};
+
+    envPairs.forEach((pair) => {
+      if (pair.key.trim()) {
+        if (pair.isSecret) {
+          secretsMap[pair.key.trim()] = pair.value;
+        } else {
+          envMap[pair.key.trim()] = pair.value;
+        }
+      }
+    });
+
+    try {
+      // In a real deployment, if using MCP or direct orchestrator endpoint:
+      // Note: If using the admin API directly or through an MCP bridge
+      const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
+      
+      // Let's create a single-service package manifest for the app manager
+      const appPackage = {
+        name: name.trim(),
+        version: "1.0.0",
+        description: `Deployed via Amoeba Web UI (${activeTab})`,
+        image: activeTab === 'image' ? dockerImage.trim() : `amoeba/${name.trim()}:latest`,
+        port: Number(port),
+        cooldown_seconds: Number(cooldown),
+        public: isPublic,
+        env: envMap,
+        secrets: secretsMap,
+      };
+
+      // Create FormData to send to /admin/apps
+      const formData = new FormData();
+      // Generate a lightweight JSON package blob
+      const manifestJson = JSON.stringify({
+        schema_version: "1",
+        service: {
+          name: name.trim(),
+          version: "1.0.0",
+          description: `Deployed via Amoeba Web UI (${activeTab})`,
+          port: Number(port),
+          cooldown_seconds: Number(cooldown),
+          image: activeTab === 'image' ? dockerImage.trim() : `amoeba/${name.trim()}:latest`,
+          public: isPublic,
+          env: envMap,
+        }
+      });
+      
+      formData.append("package", new Blob([manifestJson], { type: "application/json" }), "app.json");
+      formData.append("values", JSON.stringify({}));
+
+      const res = await fetch('/admin/apps', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || 'Failed to install service');
+      }
+
+      onDeploySuccess();
+      onClose();
+    } catch (err: any) {
+      setError(err.message || 'Deployment error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4 overflow-y-auto">
+      <div className="w-full max-w-2xl rounded-xl border border-border bg-card p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200 my-8">
+        <div className="flex items-center justify-between pb-4 border-b border-border">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              <Rocket className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-foreground">Deploy Microservice</h3>
+              <p className="text-xs text-muted-foreground">Scale-to-zero workload deployment</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Source Tabs */}
+        <div className="flex gap-2 border-b border-border my-4 pb-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('git')}
+            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              activeTab === 'git'
+                ? 'bg-primary text-primary-foreground font-semibold'
+                : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+            }`}
+          >
+            <FolderGit2 className="h-3.5 w-3.5" />
+            <span>GitHub / Git Repo</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('image')}
+            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              activeTab === 'image'
+                ? 'bg-primary text-primary-foreground font-semibold'
+                : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+            }`}
+          >
+            <Layers className="h-3.5 w-3.5" />
+            <span>Docker Image</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('dockerfile')}
+            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              activeTab === 'dockerfile'
+                ? 'bg-primary text-primary-foreground font-semibold'
+                : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+            }`}
+          >
+            <Code className="h-3.5 w-3.5" />
+            <span>Dockerfile</span>
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-4 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-xs text-destructive-foreground">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block font-medium text-foreground mb-1">
+                Service Name <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+                placeholder="e.g. pdf-parser, ai-search"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                required
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Reachable at <code className="text-blue-400">/v1/{name || '<name>'}/</code>
+              </p>
+            </div>
+
+            <div>
+              <label className="block font-medium text-foreground mb-1">Port</label>
+              <input
+                type="number"
+                value={port}
+                onChange={(e) => setPort(Number(e.target.value))}
+                placeholder="8080"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                required
+              />
+            </div>
+          </div>
+
+          {activeTab === 'git' && (
+            <div>
+              <label className="block font-medium text-foreground mb-1">
+                GitHub / Git Repository URL <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="url"
+                value={gitUrl}
+                onChange={(e) => setGitUrl(e.target.value)}
+                placeholder="https://github.com/username/fastapi-service.git"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                required
+              />
+            </div>
+          )}
+
+          {activeTab === 'image' && (
+            <div>
+              <label className="block font-medium text-foreground mb-1">
+                Docker Image Tag <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="text"
+                value={dockerImage}
+                onChange={(e) => setDockerImage(e.target.value)}
+                placeholder="e.g. python:3.11-slim, redis:7-alpine, myorg/api:v1"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                required
+              />
+            </div>
+          )}
+
+          {activeTab === 'dockerfile' && (
+            <div>
+              <label className="block font-medium text-foreground mb-1">Dockerfile Content</label>
+              <textarea
+                value={dockerfileContent}
+                onChange={(e) => setDockerfileContent(e.target.value)}
+                rows={5}
+                className="w-full rounded-md border border-input bg-background p-2.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                required
+              />
+            </div>
+          )}
+
+          {/* Scale-to-Zero & Auth Options */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border">
+            <div>
+              <label className="block font-medium text-foreground mb-1">
+                Cooldown (Seconds before sleep)
+              </label>
+              <input
+                type="number"
+                value={cooldown}
+                onChange={(e) => setCooldown(Number(e.target.value))}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            </div>
+
+            <div className="flex items-center pt-5">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isPublic}
+                  onChange={(e) => setIsPublic(e.target.checked)}
+                  className="rounded border-input text-primary focus:ring-ring h-4 w-4 bg-background"
+                />
+                <span className="font-medium text-foreground">
+                  Public API (No JWT Required)
+                </span>
+              </label>
+            </div>
+          </div>
+
+          {/* Environment Variables & Secrets */}
+          <div className="pt-2 border-t border-border">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <span className="font-medium text-foreground">Environment Variables & Secrets (.env)</span>
+                <p className="text-[11px] text-muted-foreground">Injected into the container upon cold start</p>
+              </div>
+              <button
+                type="button"
+                onClick={handleAddEnv}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:text-primary/80"
+              >
+                <Plus className="h-3 w-3" />
+                <span>Add Variable</span>
+              </button>
+            </div>
+
+            <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+              {envPairs.map((pair, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="KEY"
+                    value={pair.key}
+                    onChange={(e) => handleEnvChange(index, 'key', e.target.value)}
+                    className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <input
+                    type={pair.isSecret ? 'password' : 'text'}
+                    placeholder="VALUE"
+                    value={pair.value}
+                    onChange={(e) => handleEnvChange(index, 'value', e.target.value)}
+                    className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <label className="flex items-center gap-1 cursor-pointer text-[10px] text-muted-foreground px-1" title="Store securely as encrypted secret">
+                    <input
+                      type="checkbox"
+                      checked={pair.isSecret}
+                      onChange={(e) => handleEnvChange(index, 'isSecret', e.target.checked)}
+                      className="rounded border-input h-3.5 w-3.5 bg-background text-primary"
+                    />
+                    <Shield className="h-3 w-3 text-amber-400" />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveEnv(index)}
+                    className="p-1 rounded text-muted-foreground hover:text-red-400"
+                  >
+                    <Trash className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-4 border-t border-border">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md px-3.5 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              <Rocket className="h-3.5 w-3.5" />
+              <span>{isSubmitting ? 'Deploying...' : 'Deploy to Amoeba'}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};

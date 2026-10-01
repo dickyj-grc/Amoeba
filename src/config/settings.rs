@@ -102,24 +102,24 @@ impl AmoebaConfig {
             }
         }
 
-        self.server
-            .bind_addr
-            .parse::<SocketAddr>()
-            .map_err(|e| format!("server.bind_addr '{}' is not a valid address: {e}", self.server.bind_addr))?;
+        self.server.bind_addr.parse::<SocketAddr>().map_err(|e| {
+            format!(
+                "server.bind_addr '{}' is not a valid address: {e}",
+                self.server.bind_addr
+            )
+        })?;
 
         match self.auth.mode.as_str() {
             AUTH_MODE_LOCAL_JWT => {
                 if self.auth.jwt_secret.is_none() {
                     return Err(
-                        "auth.jwt_secret is required when auth.mode = \"local_jwt\"".to_string(),
+                        "auth.jwt_secret is required when auth.mode = \"local_jwt\"".to_string()
                     );
                 }
             }
             AUTH_MODE_JWKS => {
                 if self.auth.jwks_url.as_deref().is_none_or(str::is_empty) {
-                    return Err(
-                        "auth.jwks_url is required when auth.mode = \"jwks\"".to_string(),
-                    );
+                    return Err("auth.jwks_url is required when auth.mode = \"jwks\"".to_string());
                 }
             }
             other => {
@@ -142,9 +142,9 @@ impl AuthSettings {
         })?;
 
         if let Some(var) = raw.strip_prefix("env:") {
-            std::env::var(var)
-                .map(String::into_bytes)
-                .map_err(|_| format!("environment variable '{var}' (referenced by auth.jwt_secret) is not set"))
+            std::env::var(var).map(String::into_bytes).map_err(|_| {
+                format!("environment variable '{var}' (referenced by auth.jwt_secret) is not set")
+            })
         } else {
             Ok(raw.as_bytes().to_vec())
         }
@@ -213,7 +213,10 @@ mod tests {
             config.auth.jwks_url.as_deref(),
             Some("https://auth.example.com/.well-known/jwks.json")
         );
-        assert_eq!(config.auth.issuer.as_deref(), Some("https://auth.example.com"));
+        assert_eq!(
+            config.auth.issuer.as_deref(),
+            Some("https://auth.example.com")
+        );
     }
 
     #[test]
