@@ -1,6 +1,6 @@
 services:
   obscura:
-    image: h4ckf0r0day/obscura:latest
+    image: h4ckf0r0day/obscura:0.2.5
     container_name: amoeba-obscura
     command:
       - mcp

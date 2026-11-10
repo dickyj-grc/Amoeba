@@ -25,7 +25,7 @@ toml = "0.8"
 regex-lite = "0.1"
 age = "0.10"
 arc-swap = "1.7"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tempfile = "3"
 walkdir = "2"
 notify = "6.1"

@@ -1,0 +1,4 @@
+# Accepted Trivy findings, one ID per line (CVE-…, GHSA-…, or secret rule ID).
+# Every entry needs a comment explaining why it is safe and when to revisit, e.g.:
+#   # Not reachable: we never call foo::parse on untrusted input. Revisit 2027-01.
+#   CVE-2026-12345
