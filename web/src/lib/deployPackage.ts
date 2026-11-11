@@ -16,6 +16,8 @@ export interface DeployInput {
   port: number;
   cooldownSeconds: number;
   isPublic: boolean;
+  /** Call the app as a local client: no Origin, Host localhost (e.g. MCP servers). */
+  localUpstream?: boolean;
   envPairs: EnvPair[];
 }
 
@@ -68,6 +70,7 @@ export function buildManifest(input: DeployInput, values: InstallValues): object
     app: { type: 'image', image: input.image },
     placement: { port: input.port, cooldown_seconds: input.cooldownSeconds },
     public: input.isPublic,
+    ...(input.localUpstream ? { local_upstream: true } : {}),
     schema: { env, secrets },
   };
 }

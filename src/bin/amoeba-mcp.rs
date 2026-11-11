@@ -943,6 +943,7 @@ async fn install_app_on_amoeba(
         public,
         upstream_auth: None,
         operation_rules: Vec::new(),
+        local_upstream: false,
         resources: if memory.is_some() || cpu_cores.is_some() {
             Some(amoeba::apps::schema::ResourceSpec {
                 memory: memory.map(|m| m.to_string()),

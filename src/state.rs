@@ -2,6 +2,7 @@
 
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
 use crate::auth::JwtEngine;
+use crate::auth::issued::IssuedTokenStore;
 use crate::auth::revocation::RevocationStore;
 use crate::config::schema::ServiceCatalog;
 use crate::config::watcher::{load_catalog, spawn_file_watcher};
@@ -26,6 +27,9 @@ pub struct AppState {
     pub drivers: ArcSwap<HashMap<String, Arc<ServiceDriver>>>,
     pub jwt_engine: Arc<JwtEngine>,
     pub revocation_store: Option<RevocationStore>,
+    /// Metadata of service tokens issued by the console, kept next to the
+    /// catalog as `issued_tokens.json`.
+    pub issued_tokens: IssuedTokenStore,
     pub http_client: reqwest::Client,
     pub users_file: String,
     pub catalog_path: String,
@@ -91,6 +95,7 @@ impl AppState {
             drivers: ArcSwap::from_pointee(initial_drivers),
             jwt_engine,
             revocation_store,
+            issued_tokens: IssuedTokenStore::persistent(config_dir.join("issued_tokens.json")),
             http_client,
             users_file: users_file.to_string(),
             catalog_path: config_path.to_string(),

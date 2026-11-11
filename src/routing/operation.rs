@@ -328,6 +328,7 @@ mod tests {
             operation_rules: None,
             env_from_secret: HashMap::new(),
             header_from_secret: HashMap::new(),
+            local_upstream: false,
         }
     }
 

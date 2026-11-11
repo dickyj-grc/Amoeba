@@ -338,6 +338,11 @@ pub struct ServiceConfig {
     /// placed in the container environment.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub header_from_secret: HashMap<String, String>,
+    /// Forward requests as a local client: drop the browser's `Origin` and
+    /// send `Host: localhost:<port>`. For upstreams that only accept local
+    /// callers, such as MCP servers guarding against DNS rebinding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_upstream: bool,
 }
 
 impl ServiceConfig {

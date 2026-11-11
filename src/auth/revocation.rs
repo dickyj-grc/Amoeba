@@ -93,7 +93,7 @@ impl RevocationStore {
 }
 
 #[cfg(unix)]
-fn restrict_to_owner(path: &std::path::Path) {
+pub(crate) fn restrict_to_owner(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         warn!("failed to set permissions on {path:?}: {e}");
@@ -101,7 +101,7 @@ fn restrict_to_owner(path: &std::path::Path) {
 }
 
 #[cfg(not(unix))]
-fn restrict_to_owner(_path: &std::path::Path) {}
+pub(crate) fn restrict_to_owner(_path: &std::path::Path) {}
 
 #[cfg(test)]
 mod tests {

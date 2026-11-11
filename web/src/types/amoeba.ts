@@ -37,7 +37,22 @@ export interface ServiceTokenResponse {
   token: string;
   role: string;
   service: string;
-  org: string;
+  org_id: string | null;
+  jti: string;
+  label: string;
+  /** Unix seconds. */
+  expires_at: number;
+}
+
+/** An issued service token as listed by the gateway: metadata only. */
+export interface IssuedToken {
+  jti: string;
+  service: string;
+  label: string;
+  org_id: string | null;
+  role: string;
+  issued_at: number;
+  expires_at: number;
 }
 
 export interface InspectRepoResponse {

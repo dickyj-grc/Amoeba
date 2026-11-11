@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Service tokens for AI apps
+
+- **Choose how long a token lives.** `POST /admin/apps/<name>/token` takes `ttl_seconds` (1 minute to 366 days; default still 1 hour) and a `label`. The console defaults to 30 days, since AI apps keep the token in their MCP settings.
+- **List and revoke tokens.** `GET /admin/apps/<name>/tokens` lists unexpired tokens (label, org, expiry; never the token). `DELETE /admin/apps/<name>/tokens/<jti>` revokes one. Metadata lives in `issued_tokens.json` next to the catalog.
+- **Console token dialog.** Shows the token once with a warning, copies it even on plain-http consoles, downloads a ready-made MCP client config, and lists active tokens with a Revoke button. It now sends `org_id`, which the server expects; the old role picker and org field had no effect.
+
+### Gateway
+
+- **`local_upstream`** in `amoeba.yaml` (console: "Call as a local client") makes the gateway drop the browser's `Origin` and send `Host: localhost:<port>`. Apps that only accept local callers, such as Lightpanda's MCP server, otherwise answer `403 Origin not allowed`.
+
 ## 0.1.2 — 2026-11-11
 
 ### Upgrade notes

@@ -1,10 +1,12 @@
 //! End-to-end tests for the /admin/apps API: install, list, and uninstall
 //! Amoeba App Packages.
 
-use amoeba::auth::jwt::local_engine;
+use amoeba::auth::jwt::{local_engine, local_engine_with_revocation};
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
+use amoeba::auth::revocation::RevocationStore;
 use amoeba::routing::apps_admin::{
-    build_app_image, install_app, issue_service_token, list_apps, uninstall_app, update_app_policy,
+    build_app_image, install_app, issue_service_token, list_apps, list_service_tokens,
+    revoke_service_token, uninstall_app, update_app_policy,
 };
 use amoeba::state::AppState;
 use axum::{
@@ -13,7 +15,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Request, StatusCode, header::AUTHORIZATION},
     middleware,
-    routing::{delete, post},
+    routing::{delete, get, post},
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
@@ -59,8 +61,20 @@ fn temp_catalog_path(label: &str) -> String {
 }
 
 fn build_app(catalog_path: &str) -> Router {
-    let jwt_engine = std::sync::Arc::new(local_engine(JWT_SECRET));
-    let state = AppState::new(catalog_path, "/nonexistent/users.json", jwt_engine, None);
+    build_app_with(catalog_path, None)
+}
+
+fn build_app_with(catalog_path: &str, revocation: Option<RevocationStore>) -> Router {
+    let jwt_engine = std::sync::Arc::new(match &revocation {
+        Some(store) => local_engine_with_revocation(JWT_SECRET, store.clone()),
+        None => local_engine(JWT_SECRET),
+    });
+    let state = AppState::new(
+        catalog_path,
+        "/nonexistent/users.json",
+        jwt_engine,
+        revocation,
+    );
 
     let admin_routes = Router::new()
         .route("/apps", post(install_app).get(list_apps))
@@ -70,6 +84,8 @@ fn build_app(catalog_path: &str) -> Router {
         )
         .route("/apps/:name/build", post(build_app_image))
         .route("/apps/:name/token", post(issue_service_token))
+        .route("/apps/:name/tokens", get(list_service_tokens))
+        .route("/apps/:name/tokens/:jti", delete(revoke_service_token))
         .route_layer(middleware::from_fn(require_admin_role))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024));
 
@@ -293,6 +309,114 @@ async fn scoped_token_is_bound_to_the_service_tenant() {
     assert_eq!(decoded.claims.sub, "mcp:tenant-app");
 
     std::fs::remove_file(&catalog).ok();
+}
+
+fn admin_json(method: &str, uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(
+            AUTHORIZATION,
+            format!("Bearer {}", token_with_roles(&["admin"])),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn json_body(res: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
+}
+
+// @lat: [[deploy#Service tokens#Lifetime, list and revoke]]
+#[tokio::test]
+async fn service_tokens_can_be_long_lived_listed_and_revoked() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("services.json");
+    let catalog = catalog.to_str().unwrap();
+    let revocation = RevocationStore::new();
+    let app = || build_app_with(catalog, Some(revocation.clone()));
+
+    let admin = token_with_roles(&["admin"]);
+    let res = app()
+        .oneshot(multipart_install_request(
+            Some(&admin),
+            &tenant_package(),
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // Longer than a year is refused before anything is signed.
+    let res = app()
+        .oneshot(admin_json(
+            "POST",
+            "/admin/apps/tenant-app/token",
+            r#"{"ttl_seconds":40000000}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let thirty_days = 30 * 24 * 60 * 60;
+    let res = app()
+        .oneshot(admin_json(
+            "POST",
+            "/admin/apps/tenant-app/token",
+            &format!(r#"{{"ttl_seconds":{thirty_days},"label":"Cursor on laptop"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let issued = json_body(res).await;
+    let jti = issued["jti"].as_str().unwrap().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = issued["expires_at"].as_u64().unwrap();
+    assert!(expires_at >= now + thirty_days - 5 && expires_at <= now + thirty_days + 5);
+    assert_eq!(issued["service"], "tenant-app");
+
+    // The list has the metadata, never the token.
+    let res = app()
+        .oneshot(admin_json("GET", "/admin/apps/tenant-app/tokens", ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let list = json_body(res).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["jti"], jti.as_str());
+    assert_eq!(list[0]["label"], "Cursor on laptop");
+    assert!(list[0].get("token").is_none());
+    assert!(
+        !std::fs::read_to_string(dir.path().join("issued_tokens.json"))
+            .unwrap()
+            .contains(issued["token"].as_str().unwrap())
+    );
+
+    let revoke_uri = format!("/admin/apps/tenant-app/tokens/{jti}");
+    let res = app()
+        .oneshot(admin_json("DELETE", &revoke_uri, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(revocation.is_revoked(&jti).await);
+
+    let res = app()
+        .oneshot(admin_json("GET", "/admin/apps/tenant-app/tokens", ""))
+        .await
+        .unwrap();
+    assert_eq!(json_body(res).await, serde_json::json!([]));
+    let res = app()
+        .oneshot(admin_json("DELETE", &revoke_uri, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

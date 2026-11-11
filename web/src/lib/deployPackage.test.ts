@@ -84,6 +84,9 @@ describe('deploy package', () => {
   it('builds a manifest with empty schema when there are no variables', () => {
     const manifest = buildManifest(input, { env: {}, secrets: {} }) as any;
     expect(manifest.schema).toEqual({ env: {}, secrets: {} });
+    expect(manifest.local_upstream).toBeUndefined();
+    const local = buildManifest({ ...input, localUpstream: true }, { env: {}, secrets: {} }) as any;
+    expect(local.local_upstream).toBe(true);
   });
 
   it('writes a multi-entry zip with correct offsets', () => {
