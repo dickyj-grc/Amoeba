@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Check, Clock, Play, Send, X } from 'lucide-react';
+import { Clock, Play, Send, X } from 'lucide-react';
 import { api } from '../api/client';
 import { ServiceItem } from '../types/amoeba';
 

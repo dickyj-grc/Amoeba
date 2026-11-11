@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Key, Lock, Shield, Sparkles } from 'lucide-react';
+import { Key, Lock, Shield } from 'lucide-react';
 import { api } from '../api/client';
 
 interface LoginModalProps {
