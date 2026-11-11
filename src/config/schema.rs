@@ -13,8 +13,20 @@ pub struct UpstreamAuth {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OperationRule {
     pub operation: String,
-    pub match_type: String, // "http_method"
+    /// `"http_method"`: `values` lists the methods. `"path"`: `path` is the
+    /// pattern and `values` optionally narrows the methods (empty = any).
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
+    #[serde(default)]
     pub values: Vec<String>,
+    /// Subpath pattern for `"path"` rules, e.g. `"loans/{id}"` or `"queries/**"`.
+    /// `{name}` and `*` match one segment; a trailing `**` matches the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+fn default_match_type() -> String {
+    "http_method".into()
 }
 
 /// A resource quantity as written in `services.json`: either a Kubernetes-style
@@ -305,8 +317,10 @@ pub struct ServiceConfig {
     /// when true. Defaults to false: auth is required unless explicitly opted out.
     #[serde(default)]
     pub public: bool,
-    /// operation_rules kept for backward compatibility with services that
-    /// classify operations beyond the default HTTP-method mapping.
+    /// Ordered rules mapping method and subpath to an operation name such as
+    /// `loans.create`. The first match wins; no match falls back to the
+    /// HTTP-method mapping (`read`/`add`/`update`/`delete`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_rules: Option<Vec<OperationRule>>,
     /// env var name -> `"<service>/<key>"` secret reference, resolved at
     /// start-time by the driver and injected directly into the container/
