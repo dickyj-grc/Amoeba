@@ -21,6 +21,12 @@ AMOEBA_DIR=/opt/amoeba
 git clone https://github.com/dickyj-grc/Amoeba.git "$AMOEBA_DIR" || true
 cd "$AMOEBA_DIR"
 
+# Commit and orchestrator image under test. The orchestrator substitutes these;
+# the defaults (main, :latest) match a scheduled nightly run.
+AMOEBA_REF="${AMOEBA_E2E_REF:-main}"
+AMOEBA_IMAGE="${AMOEBA_E2E_IMAGE:-ghcr.io/dickyj-grc/amoeba:latest}"
+git checkout "$AMOEBA_REF"
+
 # Inject secrets from environment (set by the orchestrator via write_files)
 JWT_SECRET="${AMOEBA_LOCAL_JWT_SECRET:-change-me-in-production}"
 AGE_SECRET="${AMOEBA_AGE_SECRET_KEY:-}"
@@ -78,6 +84,7 @@ cd "$AMOEBA_DIR"
 cat > "$AMOEBA_DIR/.env" <<EOF
 AMOEBA_LOCAL_JWT_SECRET=$JWT_SECRET
 AMOEBA_AGE_SECRET_KEY=$AGE_SECRET
+AMOEBA_IMAGE=$AMOEBA_IMAGE
 EOF
 chmod 600 "$AMOEBA_DIR/.env"
 

@@ -44,6 +44,13 @@ pub fn resolve_proxy_secrets(
     resolve_secret_map(Path::new(&secrets_dir()), header_from_secret)
 }
 
+/// Reads one `"<service>/<key>"` secret reference. Trimmed; never logged.
+pub fn resolve_secret_ref(secret_ref: &str) -> Result<String, String> {
+    let map = HashMap::from([(secret_ref.to_string(), secret_ref.to_string())]);
+    let mut resolved = resolve_secret_map(Path::new(&secrets_dir()), &map)?;
+    Ok(resolved.pop().map(|(_, value)| value).unwrap_or_default())
+}
+
 fn resolve_secret_map(
     dir: &Path,
     secrets: &HashMap<String, String>,

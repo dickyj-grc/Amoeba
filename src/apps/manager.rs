@@ -10,7 +10,7 @@ use super::schema::{
 use super::state::LifecycleStatus;
 use crate::config::schema::{
     ContainerResources, ContainerSpec, MachineConfig, Placement, ResourceQuantities,
-    ServiceCatalog, ServiceConfig, StackSpec,
+    ServiceCatalog, ServiceConfig, StackSpec, UpstreamAuth,
 };
 use crate::lifecycle::container::wait_until_ready;
 use crate::state::AppState;
@@ -347,6 +347,28 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
         }
     }
 
+    if let Some(auth) = &manifest.upstream_auth {
+        if !manifest.schema.secrets.contains_key(&auth.secret) {
+            return Err(AppManagerError::Validation(format!(
+                "upstream_auth.secret '{}' is not declared in schema.secrets",
+                auth.secret
+            )));
+        }
+        match (auth.r#type.as_str(), &auth.header_name) {
+            ("bearer_static", _) | ("custom_header", Some(_)) => {}
+            ("custom_header", None) => {
+                return Err(AppManagerError::Validation(
+                    "upstream_auth type custom_header needs header_name".into(),
+                ));
+            }
+            (other, _) => {
+                return Err(AppManagerError::Validation(format!(
+                    "unknown upstream_auth type '{other}'"
+                )));
+            }
+        }
+    }
+
     if let Some(resources) = &manifest.resources {
         if let Some(memory) = &resources.memory {
             crate::config::schema::parse_quantity_to_mb(memory).map_err(|e| {
@@ -634,7 +656,12 @@ fn build_service_config(
         permissions: manifest.permissions.clone(),
         tenant: manifest.tenant.clone(),
         tenant_permissions: manifest.tenant_permissions.clone(),
-        upstream_auth: None,
+        upstream_auth: manifest.upstream_auth.as_ref().map(|auth| UpstreamAuth {
+            r#type: auth.r#type.clone(),
+            token_env_var: None,
+            header_name: auth.header_name.clone(),
+            token_secret: Some(format!("{}/{}", manifest.service_name(), auth.secret)),
+        }),
         public: manifest.public,
         operation_rules: None,
         env_from_secret,
@@ -1083,6 +1110,105 @@ schema:
             .await;
 
         assert!(matches!(result, Err(AppManagerError::Validation(_))));
+    }
+
+    // @lat: [[secrets#Gateway credential from a secret]]
+    #[tokio::test]
+    async fn upstream_auth_points_at_the_declared_secret() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let token = "t".repeat(40);
+        let values = || InstallValues {
+            secrets: HashMap::from([("TOKEN".to_string(), token.clone())]),
+            ..Default::default()
+        };
+
+        let manifest = format!(
+            "{}upstream_auth:\n  type: bearer_static\n  secret: TOKEN\n",
+            image_manifest()
+        );
+        manager
+            .install(&package_zip_with_manifest(&manifest), values())
+            .await
+            .unwrap();
+        let catalog = load_catalog(&catalog_path).unwrap();
+        let auth = catalog.services["test-image"]
+            .upstream_auth
+            .clone()
+            .unwrap();
+        assert_eq!(auth.r#type, "bearer_static");
+        assert_eq!(auth.token_secret.as_deref(), Some("test-image/TOKEN"));
+        assert!(auth.token_env_var.is_none());
+        // The same secret still reaches the container.
+        assert_eq!(
+            catalog.services["test-image"].env_from_secret["TOKEN"],
+            "test-image/TOKEN"
+        );
+
+        for (bad, why) in [
+            (
+                "upstream_auth:\n  type: bearer_static\n  secret: OTHER\n",
+                "not declared",
+            ),
+            (
+                "upstream_auth:\n  type: custom_header\n  secret: TOKEN\n",
+                "header_name",
+            ),
+            (
+                "upstream_auth:\n  type: oauth\n  secret: TOKEN\n",
+                "unknown upstream_auth",
+            ),
+        ] {
+            let manifest = format!("{}{bad}", image_manifest());
+            let result = manager
+                .install(&package_zip_with_manifest(&manifest), values())
+                .await;
+            assert!(
+                matches!(&result, Err(AppManagerError::Validation(m)) if m.contains(why)),
+                "{bad}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn obscura_example_package_wires_its_token_both_ways() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/app-packages/obscura");
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+            for file in ["amoeba.yaml", "compose.yaml"] {
+                zip.start_file(file, FileOptions::<()>::default()).unwrap();
+                zip.write_all(&fs::read(dir.join(file)).unwrap()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+
+        let short = InstallValues {
+            secrets: HashMap::from([("OBSCURA_MCP_TOKEN".to_string(), "too-short".to_string())]),
+            ..Default::default()
+        };
+        assert!(manager.install(&buf, short).await.is_err());
+
+        let values = InstallValues {
+            secrets: HashMap::from([("OBSCURA_MCP_TOKEN".to_string(), "x".repeat(64))]),
+            ..Default::default()
+        };
+        manager.install(&buf, values).await.unwrap();
+        let svc = &load_catalog(&catalog_path).unwrap().services["obscura"];
+        assert_eq!(
+            svc.env_from_secret["OBSCURA_MCP_TOKEN"],
+            "obscura/OBSCURA_MCP_TOKEN"
+        );
+        let auth = svc.upstream_auth.as_ref().unwrap();
+        assert_eq!(auth.r#type, "bearer_static");
+        assert_eq!(
+            auth.token_secret.as_deref(),
+            Some("obscura/OBSCURA_MCP_TOKEN")
+        );
     }
 
     // @lat: [[secrets#Install-time validation]]

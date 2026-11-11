@@ -39,6 +39,11 @@ pub struct AppManifest {
     #[serde(default)]
     pub public: bool,
 
+    /// Credential the gateway sends to the app on every request, taken from
+    /// one of the declared `schema.secrets`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_auth: Option<AppUpstreamAuth>,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,
@@ -62,6 +67,20 @@ pub enum AppSpec {
         #[serde(default)]
         primary_service: Option<String>,
     },
+}
+
+/// Gateway-to-app credential for apps that require auth on every request
+/// (e.g. an MCP server that refuses to start without a token). The same
+/// secret usually also has `inject: env` so the app knows what to expect.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AppUpstreamAuth {
+    /// `bearer_static` (`Authorization: Bearer <secret>`) or `custom_header`.
+    pub r#type: String,
+    /// Key of a secret declared in `schema.secrets`.
+    pub secret: String,
+    /// Header to set for `custom_header`.
+    #[serde(default)]
+    pub header_name: Option<String>,
 }
 
 /// Placement / routing configuration.

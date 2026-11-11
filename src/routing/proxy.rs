@@ -53,10 +53,18 @@ pub fn apply_upstream_auth(
     };
 
     let token = || -> Result<String, String> {
+        if let Some(secret_ref) = &auth_cfg.token_secret {
+            let token = crate::lifecycle::driver::resolve_secret_ref(secret_ref)?;
+            return if token.is_empty() {
+                Err(format!("upstream token secret '{secret_ref}' is empty"))
+            } else {
+                Ok(token)
+            };
+        }
         let env_var = auth_cfg
             .token_env_var
             .as_deref()
-            .ok_or("upstream_auth has no token_env_var")?;
+            .ok_or("upstream_auth has no token_env_var or token_secret")?;
         match std::env::var(env_var) {
             Ok(token) if !token.is_empty() => Ok(token),
             _ => Err(format!(
@@ -574,6 +582,7 @@ mod tests {
             r#type: "bearer_static".into(),
             token_env_var: Some("AMOEBA_TEST_UPSTREAM_TOKEN".into()),
             header_name: None,
+            token_secret: None,
         }));
 
         let client = reqwest::Client::new();
@@ -593,6 +602,7 @@ mod tests {
             r#type: "custom_header".into(),
             token_env_var: Some("AMOEBA_TEST_UPSTREAM_HEADER_TOKEN".into()),
             header_name: Some("X-Internal-Key".into()),
+            token_secret: None,
         }));
 
         let client = reqwest::Client::new();
@@ -605,6 +615,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn upstream_auth_reads_token_from_an_installed_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("mcp")).unwrap();
+        std::fs::write(dir.path().join("mcp/TOKEN"), "from-secret\n").unwrap();
+        unsafe { std::env::set_var("AMOEBA_SECRETS_DIR", dir.path()) };
+        let auth = |secret: &str| {
+            base_service_cfg(Some(UpstreamAuth {
+                r#type: "bearer_static".into(),
+                token_env_var: Some("AMOEBA_TEST_UPSTREAM_TOKEN".into()),
+                header_name: None,
+                token_secret: Some(secret.into()),
+            }))
+        };
+        let client = reqwest::Client::new();
+
+        // The secret wins over token_env_var.
+        let built = apply_upstream_auth(client.get("http://127.0.0.1/x"), &auth("mcp/TOKEN"))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            built.headers().get(AUTHORIZATION).unwrap(),
+            "Bearer from-secret"
+        );
+        // A missing secret file fails closed.
+        assert!(apply_upstream_auth(client.get("http://127.0.0.1/x"), &auth("mcp/NOPE")).is_err());
+    }
+
     // @lat: [[gateway#Upstream credentials#Fails closed]]
     #[test]
     fn upstream_auth_fails_closed_without_a_token() {
@@ -614,6 +653,7 @@ mod tests {
                 r#type: r#type.into(),
                 token_env_var: env.map(str::to_string),
                 header_name: header.map(str::to_string),
+                token_secret: None,
             }))
         };
         unsafe { std::env::remove_var("AMOEBA_TEST_UNSET_TOKEN") };

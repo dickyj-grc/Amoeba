@@ -8,6 +8,11 @@ pub struct UpstreamAuth {
     pub r#type: String, // "bearer_static" or "custom_header"
     pub token_env_var: Option<String>,
     pub header_name: Option<String>,
+    /// `"<service>/<key>"` reference into the secrets directory, read on each
+    /// request. Takes precedence over `token_env_var`. App packages set this
+    /// so the gateway and the container share one installed secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -79,6 +79,14 @@ def cloud_init_user_data(age_secret_key: str | None) -> str:
         'AGE_SECRET="${AMOEBA_AGE_SECRET_KEY:-}"',
         f'AGE_SECRET="{age_secret_key or ""}"',
     )
+    data = data.replace(
+        'AMOEBA_REF="${AMOEBA_E2E_REF:-main}"',
+        f'AMOEBA_REF="{os.environ.get("AMOEBA_E2E_REF") or "main"}"',
+    )
+    data = data.replace(
+        'AMOEBA_IMAGE="${AMOEBA_E2E_IMAGE:-ghcr.io/dickyj-grc/amoeba:latest}"',
+        f'AMOEBA_IMAGE="{os.environ.get("AMOEBA_E2E_IMAGE") or "ghcr.io/dickyj-grc/amoeba:latest"}"',
+    )
     return data
 
 

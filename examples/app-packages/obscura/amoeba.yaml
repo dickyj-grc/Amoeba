@@ -14,5 +14,18 @@ permissions:
   # operation -- read-only wouldn't be enough to call any MCP method at all.
   read: [admin, analyst]
   add: [admin, analyst]
+# Obscura 0.2.3+ refuses to serve MCP over HTTP without a bearer token. The
+# installer supplies one secret; the container gets it as OBSCURA_MCP_TOKEN
+# and Amoeba sends it as `Authorization: Bearer ...` on every proxied call.
+# Callers never see it: they authenticate to Amoeba with their own JWT.
+upstream_auth:
+  type: bearer_static
+  secret: OBSCURA_MCP_TOKEN
 schema:
   env: {}
+  secrets:
+    OBSCURA_MCP_TOKEN:
+      description: Shared token between Amoeba and Obscura's MCP server (32+ characters).
+      required: true
+      validation_pattern: "^.{32,}$"
+      inject: env
