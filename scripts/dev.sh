@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run Amoeba locally in one step: API on http://localhost:8080 and, unless
-# --no-console is given, the web console on http://localhost:3000.
+# Run Amoeba locally in one step: API on http://localhost:8064 and, unless
+# --no-console is given, the web console on http://localhost:3064.
 #
 # Picks a mode automatically:
 #   native  macOS with Apple's `container` CLI and cargo: Amoeba runs as a
@@ -132,7 +132,7 @@ if [ "$mode" = native ]; then
   write_catalog "$native_dir/services.json" apple-container
   cat > "$native_dir/config.toml" <<TOML
 [server]
-bind_addr = "127.0.0.1:8080"
+bind_addr = "127.0.0.1:8064"
 
 [auth]
 mode = "local_jwt"
@@ -178,7 +178,7 @@ printf 'Waiting for the API'
 ready=false
 for _ in $(seq 1 60); do
   # Any HTTP response means the server is listening.
-  if curl -s -o /dev/null http://127.0.0.1:8080/auth/login; then ready=true; break; fi
+  if curl -s -o /dev/null http://127.0.0.1:8064/auth/login; then ready=true; break; fi
   printf '.'
   sleep 1
 done
@@ -189,8 +189,8 @@ fi
 echo " ready."
 
 echo
-echo "  API:      http://localhost:8080"
-$console && echo "  Console:  http://localhost:3000"
+echo "  API:      http://localhost:8064"
+$console && echo "  Console:  http://localhost:3064"
 echo "  User:     admin"
 echo "  Password: $admin_password"
 echo "  Logs:     $log_hint"

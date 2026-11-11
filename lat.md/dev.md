@@ -1,6 +1,6 @@
 # Dev
 
-`scripts/dev.sh` runs Amoeba locally in one command: the API on `localhost:8080` and the web console on `localhost:3000`.
+`scripts/dev.sh` runs Amoeba locally in one command: the API on `localhost:8064` and the web console on `localhost:3064`.
 
 It creates `.env` with a random JWT secret, an empty service catalog and an `admin` user, and prints the admin password. `--down` stops everything; `--help` lists the other flags.
 
@@ -26,6 +26,6 @@ Apple containers get a new IP on every start, so the loader rejects `placement.i
 
 ## Docker mode
 
-The orchestrator runs in Docker Compose with `docker-compose.dev.yml`, which publishes only the orchestrator on `127.0.0.1:8080` (no Caddy).
+The orchestrator runs in Docker Compose with `docker-compose.dev.yml`, which publishes only the orchestrator on `127.0.0.1:8064` (no Caddy). Inside the container it still listens on 8080.
 
 By default it pulls `ghcr.io/dickyj-grc/amoeba:latest`. That image is `linux/amd64` only, so Apple Silicon runs it emulated; `--build` builds a native image from the checkout instead.
