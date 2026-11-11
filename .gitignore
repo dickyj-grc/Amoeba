@@ -23,3 +23,6 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 .eslintcache
+.claude
+.mcp.json
+lat.md/.cache

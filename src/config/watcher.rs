@@ -79,6 +79,9 @@ pub fn validate_service_access(name: &str, svc: &ServiceConfig) -> Result<(), St
             "service '{name}' is public and also binds a tenant"
         ));
     }
+    if let Some(rules) = &svc.operation_rules {
+        crate::routing::operation::validate_operation_rules(name, rules)?;
+    }
     Ok(())
 }
 
