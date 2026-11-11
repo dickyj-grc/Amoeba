@@ -17,19 +17,18 @@ jobs:
       contents: read
       packages: write
     env:
-      # Manual runs on a branch must test that branch's orchestrator, not the
-      # :latest image built from main, so build and push one for this commit.
-      BRANCH_RUN: ${{ github.ref != 'refs/heads/main' }}
+      # Always test the orchestrator built from this exact commit. :latest can
+      # lag main (docker-release.yml cancels superseded builds), and a branch
+      # run must not test main's server at all.
+      E2E_IMAGE: ghcr.io/dickyj-grc/amoeba:sha-${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        if: env.BRANCH_RUN == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: env.BRANCH_RUN == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -37,12 +36,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push orchestrator image for this commit
-        if: env.BRANCH_RUN == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/dickyj-grc/amoeba:sha-${{ github.sha }}
+          tags: ${{ env.E2E_IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -73,7 +71,7 @@ jobs:
           AMOEBA_LOCAL_JWT_SECRET: ${{ secrets.AMOEBA_LOCAL_JWT_SECRET }}
           AMOEBA_AGE_SECRET_KEY: ${{ secrets.AMOEBA_AGE_SECRET_KEY }}
           AMOEBA_E2E_REF: ${{ github.sha }}
-          AMOEBA_E2E_IMAGE: ${{ env.BRANCH_RUN == 'true' && format('ghcr.io/dickyj-grc/amoeba:sha-{0}', github.sha) || 'ghcr.io/dickyj-grc/amoeba:latest' }}
+          AMOEBA_E2E_IMAGE: ${{ env.E2E_IMAGE }}
         run: python scripts/e2e-do.py --html=report.html --self-contained-html
 
       # Belt-and-braces cleanup: the e2e fixture destroys its droplet in teardown,

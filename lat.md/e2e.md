@@ -8,4 +8,4 @@ The droplet must run the same commit as the tests, or a branch run checks new te
 
 `scripts/e2e-cloud-init.sh` clones the repo, checks out `AMOEBA_E2E_REF`, and runs the orchestrator image named by `AMOEBA_E2E_IMAGE` through `docker-compose.e2e.yml`. Both are substituted by `scripts/e2e/conftest.py`; the defaults are `main` and `ghcr.io/dickyj-grc/amoeba:latest`.
 
-The scheduled run on `main` uses `:latest` from `docker-release.yml`. A manual run on another branch (`gh workflow run nightly-e2e.yml --ref <branch>`) first builds and pushes `ghcr.io/dickyj-grc/amoeba:sha-<commit>` and runs that.
+Every run, scheduled or manual on any branch (`gh workflow run nightly-e2e.yml --ref <branch>`), first builds and pushes `ghcr.io/dickyj-grc/amoeba:sha-<commit>` and runs that. It never uses `:latest`, which can lag `main`: `docker-release.yml` cancels a build when a newer push supersedes it, and one run tested a pre-fix image that way.
