@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.1.2 — 2026-11-11
+
+### Upgrade notes
+
+- **New image: `ghcr.io/dickyj-grc/amoeba-db`.** The database service ships as its own image. GHCR creates new packages as private, so make it public, as `amoeba` is, before installing the `finance-db` example elsewhere.
+- **Console dev server ports changed.** `npm run dev` in `web/` now serves on `3064` and proxies to the API on `8064`, matching `scripts/dev.sh`. Before, it used `3000` and `8080`.
+- **Installs check the whole catalog.** An app install that would leave `services.json` invalid now fails with `400`. Before, the file was written, and the gateway silently kept serving the old catalog.
+
+### Database service (new)
+
+- `amoeba-db` holds one PostgreSQL connection and serves only approved definitions: tables opened for specific operations, and named queries. Callers send names and values, never SQL (#18).
+- Per-role column policy (`show`, `mask`, `hide`). Masking happens in the generated SQL, so a masked value never leaves the database. Unlisted columns stay closed.
+- Guardrails:
+  - Reads run in `READ ONLY` transactions, on a separate read connection if one is configured.
+  - Writes can use their own account (`DATABASE_URL_WRITE`).
+  - Every statement has a timeout.
+  - A write that touches more rows than its limit is rolled back.
+  - Rows are scoped to the caller's org (`app.org`, `org_column`).
+  - Every call writes one audit record.
+- Every definition the caller's roles allow is also an MCP tool at `/mcp`.
+- Definitions hot-reload from `DB_DEFINITIONS_FILE`. An invalid edit is logged, and the previous definitions stay in force.
+- Example package `examples/app-packages/finance-db`, with demo data in `demo.sql`.
+
+### Gateway
+
+- App manifests can declare `operation_rules`, so a package can name its own operations (for example, one per table and query) and grant them separately (#18).
+- `AMOEBA_SERVICES_FILE` overrides the catalog path (default `/etc/amoeba/services.json`) (#17).
+- Install, uninstall and policy changes apply to the running gateway immediately, instead of waiting for the file watcher (#17).
+
+### Apple `container` driver (macOS)
+
+- Image apps install correctly on `apple-container` machines. Before, the install was silently ignored (#17).
+- New apps no longer get stuck in `pulling`: the readiness probe uses the container's resolved IP and pulls with `container image pull` (#17).
+- Plain env vars from the install now reach the container. Before, only secrets did (#17).
+
+### Local development
+
+- `scripts/dev.sh` runs Amoeba and the web console in one command, with the API on `localhost:8064` and the console on `localhost:3064`. On macOS with Apple's `container` CLI it runs natively, with no Docker Desktop VM; elsewhere it uses Docker Compose (#17).
+- The README has a new Run Locally section, an intro built around Amoeba's two jobs, and a roadmap (#19).
+
+### CI
+
+- Nightly e2e builds and tests the image for its own commit, never `:latest`. A stale `:latest` had made a passing fix look broken (#16).
+- A new CI job runs the database service's tests against a real Postgres. Releases also publish the `amoeba-db` image (#18).
+
 ## 0.1.1 — 2026-11-11
 
 ### Upgrade notes
