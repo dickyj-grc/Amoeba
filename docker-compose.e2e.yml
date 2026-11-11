@@ -1,6 +1,7 @@
 services:
   # Nightly e2e runs against the image built by .github/workflows/docker-release.yml
-  # instead of compiling from source on every fresh droplet.
+  # instead of compiling from source on every fresh droplet. A manual run on a
+  # branch sets AMOEBA_IMAGE to that commit's image (see nightly-e2e.yml).
   orchestrator:
     build: !reset null
-    image: ghcr.io/dickyj-grc/amoeba:latest
+    image: ${AMOEBA_IMAGE:-ghcr.io/dickyj-grc/amoeba:latest}
