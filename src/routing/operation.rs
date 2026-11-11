@@ -2,7 +2,7 @@
 //! and checks it against claims.roles and the service's access form.
 
 use crate::auth::Claims;
-use crate::config::schema::ServiceConfig;
+use crate::config::schema::{OperationRule, ServiceConfig};
 
 /// Maps an HTTP method to a coarse-grained operation name.
 pub fn classify_operation(method: &str) -> &'static str {
@@ -13,6 +13,103 @@ pub fn classify_operation(method: &str) -> &'static str {
         "DELETE" => "delete",
         _ => "read",
     }
+}
+
+/// Picks the operation for a request: the first matching `operation_rules`
+/// entry, else the HTTP-method mapping.
+pub fn resolve_operation<'a>(service: &'a ServiceConfig, method: &str, subpath: &str) -> &'a str {
+    service
+        .operation_rules
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|rule| rule_matches(rule, method, subpath))
+        .map(|rule| rule.operation.as_str())
+        .unwrap_or_else(|| classify_operation(method))
+}
+
+fn rule_matches(rule: &OperationRule, method: &str, subpath: &str) -> bool {
+    let method_ok = |required: bool| {
+        if rule.values.is_empty() {
+            !required
+        } else {
+            rule.values.iter().any(|v| v.eq_ignore_ascii_case(method))
+        }
+    };
+    match rule.match_type.as_str() {
+        "http_method" => method_ok(true),
+        "path" => {
+            method_ok(false)
+                && rule
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| path_matches(p, subpath))
+        }
+        _ => false,
+    }
+}
+
+/// Segment-wise match. `{name}` and `*` match exactly one segment; a final
+/// `**` matches zero or more remaining segments. Leading/trailing slashes
+/// are ignored on both sides.
+pub fn path_matches(pattern: &str, subpath: &str) -> bool {
+    let mut pat = pattern.split('/').filter(|s| !s.is_empty()).peekable();
+    let mut path = subpath.split('/').filter(|s| !s.is_empty());
+    while let Some(p) = pat.next() {
+        if p == "**" && pat.peek().is_none() {
+            return true;
+        }
+        let Some(seg) = path.next() else {
+            return false;
+        };
+        let wildcard = p == "*" || (p.starts_with('{') && p.ends_with('}'));
+        if !wildcard && p != seg {
+            return false;
+        }
+    }
+    path.next().is_none()
+}
+
+/// Load-time checks so a typo'd rule is rejected instead of never matching.
+pub fn validate_operation_rules(name: &str, rules: &[OperationRule]) -> Result<(), String> {
+    for rule in rules {
+        if rule.operation.is_empty() {
+            return Err(format!(
+                "service '{name}' has an operation rule with no operation"
+            ));
+        }
+        match rule.match_type.as_str() {
+            "http_method" if rule.values.is_empty() => {
+                return Err(format!(
+                    "service '{name}' rule '{}' matches on http_method but lists no methods",
+                    rule.operation
+                ));
+            }
+            "http_method" => {}
+            "path" => {
+                let Some(pattern) = rule.path.as_deref() else {
+                    return Err(format!(
+                        "service '{name}' rule '{}' matches on path but sets no path",
+                        rule.operation
+                    ));
+                };
+                let segs: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+                if segs.iter().rev().skip(1).any(|s| *s == "**") {
+                    return Err(format!(
+                        "service '{name}' rule '{}': '**' is only allowed as the last segment",
+                        rule.operation
+                    ));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "service '{name}' rule '{}' has unknown match_type '{other}'",
+                    rule.operation
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Checks whether any of the caller's roles are present in the allowed role list.
@@ -94,6 +191,85 @@ mod tests {
     #[test]
     fn defaults_unknown_methods_to_read() {
         assert_eq!(classify_operation("OPTIONS"), "read");
+    }
+
+    fn path_rule(operation: &str, path: &str, methods: &[&str]) -> OperationRule {
+        OperationRule {
+            operation: operation.into(),
+            match_type: "path".into(),
+            values: methods.iter().map(|m| m.to_string()).collect(),
+            path: Some(path.into()),
+        }
+    }
+
+    #[test]
+    fn path_patterns_match_segments() {
+        assert!(path_matches("loans", "loans"));
+        assert!(path_matches("/loans/", "loans"));
+        assert!(path_matches("loans/{id}", "loans/42"));
+        assert!(path_matches("loans/*/payments", "loans/42/payments"));
+        assert!(!path_matches("loans/{id}", "loans"));
+        assert!(!path_matches("loans/{id}", "loans/42/payments"));
+        assert!(!path_matches("loans", "leases"));
+        assert!(path_matches("queries/**", "queries"));
+        assert!(path_matches("queries/**", "queries/by-branch/run"));
+        assert!(!path_matches("queries/**", "tables/loans"));
+    }
+
+    // @lat: [[gateway#Operation resolution]]
+    #[test]
+    fn resolves_named_operation_from_path_rules() {
+        let mut svc = bare_service();
+        svc.operation_rules = Some(vec![
+            path_rule("loans.create", "tables/loans", &["POST"]),
+            path_rule("loans.read", "tables/loans/**", &["get", "HEAD"]),
+            path_rule("queries.run", "queries/{name}", &[]),
+            OperationRule {
+                operation: "purge".into(),
+                match_type: "http_method".into(),
+                values: vec!["DELETE".into()],
+                path: None,
+            },
+        ]);
+        assert_eq!(
+            resolve_operation(&svc, "POST", "tables/loans"),
+            "loans.create"
+        );
+        assert_eq!(
+            resolve_operation(&svc, "GET", "tables/loans/7"),
+            "loans.read"
+        );
+        assert_eq!(
+            resolve_operation(&svc, "POST", "queries/by_branch"),
+            "queries.run"
+        );
+        assert_eq!(resolve_operation(&svc, "DELETE", "tables/loans/7"), "purge");
+        // No rule matches: method mapping.
+        assert_eq!(resolve_operation(&svc, "PUT", "tables/loans/7"), "update");
+        assert_eq!(resolve_operation(&bare_service(), "POST", "x"), "add");
+    }
+
+    #[test]
+    fn rejects_malformed_operation_rules() {
+        let ok = vec![path_rule("a", "x/**", &[])];
+        assert!(validate_operation_rules("svc", &ok).is_ok());
+        let no_path = vec![OperationRule {
+            path: None,
+            ..path_rule("a", "x", &[])
+        }];
+        assert!(validate_operation_rules("svc", &no_path).is_err());
+        let mid_glob = vec![path_rule("a", "x/**/y", &[])];
+        assert!(validate_operation_rules("svc", &mid_glob).is_err());
+        let no_methods = vec![OperationRule {
+            match_type: "http_method".into(),
+            ..path_rule("a", "x", &[])
+        }];
+        assert!(validate_operation_rules("svc", &no_methods).is_err());
+        let unknown = vec![OperationRule {
+            match_type: "regex".into(),
+            ..path_rule("a", "x", &[])
+        }];
+        assert!(validate_operation_rules("svc", &unknown).is_err());
     }
 
     fn claims_with_roles(roles: &[&str]) -> Claims {

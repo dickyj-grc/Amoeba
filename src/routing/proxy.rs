@@ -1,6 +1,6 @@
 //! Extracts service_name/subpath from the incoming path and dispatches upstream.
 
-use super::operation::{AccessDeny, authorize, classify_operation};
+use super::operation::{AccessDeny, authorize, resolve_operation};
 use crate::apps::state::AppLifecycleState;
 use crate::auth::Claims;
 use crate::auth::middleware::verify_request_token;
@@ -41,44 +41,56 @@ fn rejection(status: StatusCode, reason: &'static str) -> Response {
         .unwrap()
 }
 
-/// Applies configured upstream credential injection (token translation) to an outbound request.
+/// Applies configured upstream credential injection (token translation) to an
+/// outbound request. Fails closed: a configured credential that is missing,
+/// empty, or unusable is an error, never an empty or absent header.
 pub fn apply_upstream_auth(
-    mut outbound_req: reqwest::RequestBuilder,
+    outbound_req: reqwest::RequestBuilder,
     service_cfg: &ServiceConfig,
-) -> reqwest::RequestBuilder {
+) -> Result<reqwest::RequestBuilder, String> {
     let Some(auth_cfg) = &service_cfg.upstream_auth else {
-        return outbound_req;
+        return Ok(outbound_req);
     };
 
-    match auth_cfg.r#type.as_str() {
-        "bearer_static" => {
-            if let Some(env_var) = &auth_cfg.token_env_var {
-                let token = std::env::var(env_var).unwrap_or_default();
-                outbound_req = outbound_req.header(AUTHORIZATION, format!("Bearer {token}"));
-            }
+    let token = || -> Result<String, String> {
+        let env_var = auth_cfg
+            .token_env_var
+            .as_deref()
+            .ok_or("upstream_auth has no token_env_var")?;
+        match std::env::var(env_var) {
+            Ok(token) if !token.is_empty() => Ok(token),
+            _ => Err(format!(
+                "upstream token env var '{env_var}' is unset or empty"
+            )),
         }
-        "custom_header" => {
-            if let (Some(hdr), Some(env_var)) = (&auth_cfg.header_name, &auth_cfg.token_env_var) {
-                let val = std::env::var(env_var).unwrap_or_default();
-                if let (Ok(name), Ok(value)) = (
-                    HeaderName::from_bytes(hdr.as_bytes()),
-                    HeaderValue::from_str(&val),
-                ) {
-                    outbound_req = outbound_req.header(name, value);
-                }
-            }
-        }
-        _ => {}
-    }
+    };
 
-    outbound_req
+    let (name, value) = match auth_cfg.r#type.as_str() {
+        "bearer_static" => (AUTHORIZATION, format!("Bearer {}", token()?)),
+        "custom_header" => {
+            let hdr = auth_cfg
+                .header_name
+                .as_deref()
+                .ok_or("upstream_auth custom_header has no header_name")?;
+            let name = HeaderName::from_bytes(hdr.as_bytes())
+                .map_err(|e| format!("invalid upstream header name '{hdr}': {e}"))?;
+            (name, token()?)
+        }
+        other => return Err(format!("unknown upstream_auth type '{other}'")),
+    };
+    let value = HeaderValue::from_str(&value)
+        .map_err(|_| "upstream token is not a valid header value".to_string())?;
+    Ok(outbound_req.header(name, value))
 }
 
 /// Headers the gateway itself owns. Client-supplied copies are dropped so a
 /// caller cannot pick their own org or secret.
 fn is_gateway_identity_header(name: &HeaderName) -> bool {
     let lower = name.as_str().to_ascii_lowercase();
-    lower == "x-amoeba-org" || lower == "x-amoeba-user" || lower.starts_with("x-amoeba-secret-")
+    lower == "x-amoeba-org"
+        || lower == "x-amoeba-user"
+        || lower == "x-amoeba-roles"
+        || lower.starts_with("x-amoeba-secret-")
 }
 
 fn apply_caller_identity(
@@ -91,7 +103,11 @@ fn apply_caller_identity(
     if let Some(org) = &claims.org_id {
         outbound_req = outbound_req.header("x-amoeba-org", org);
     }
-    outbound_req.header("x-amoeba-user", &claims.sub)
+    // Comma-separated, as on the token. Always sent so an empty value means
+    // "no roles" rather than a missing header the upstream might misread.
+    outbound_req
+        .header("x-amoeba-user", &claims.sub)
+        .header("x-amoeba-roles", claims.roles.join(","))
 }
 
 /// Header name the proxy uses for a secret injected per request.
@@ -216,8 +232,9 @@ pub async fn proxy_handler(
         Some(verify_request_token(&state.jwt_engine, req.headers()).await?)
     };
 
-    // 3. Classify Operation (HTTP Method -> Operation Name)
-    let operation = classify_operation(req.method().as_str());
+    // 3. Classify Operation: the service's operation_rules (method + subpath),
+    // else the HTTP-method mapping.
+    let operation = resolve_operation(service_cfg, req.method().as_str(), &subpath);
 
     // 4. ACL Check. Public services skip this. Otherwise the service's access
     // form (tenant-unaware, single-tenant, or per-org maps) selects the role list.
@@ -393,8 +410,9 @@ pub async fn proxy_handler(
     outbound_req = apply_caller_identity(outbound_req, claims.as_ref());
 
     // 7. Handle Upstream Token Translation / Credential Injection
-    outbound_req = apply_upstream_auth(outbound_req, service_cfg);
-    outbound_req = match apply_proxy_secrets(outbound_req, service_cfg) {
+    outbound_req = match apply_upstream_auth(outbound_req, service_cfg)
+        .and_then(|req| apply_proxy_secrets(req, service_cfg))
+    {
         Ok(req) => req,
         Err(message) => {
             error!(service = %service_name, "{message}");
@@ -499,6 +517,7 @@ mod tests {
         }
     }
 
+    // @lat: [[gateway#Caller identity]]
     #[test]
     fn caller_identity_comes_from_the_token() {
         let claims = crate::auth::Claims {
@@ -519,8 +538,12 @@ mod tests {
             built.headers().get("x-amoeba-user").unwrap(),
             "analyst_user"
         );
+        assert_eq!(built.headers().get("x-amoeba-roles").unwrap(), "analyst");
         assert!(is_gateway_identity_header(&HeaderName::from_static(
             "x-amoeba-org"
+        )));
+        assert!(is_gateway_identity_header(&HeaderName::from_static(
+            "x-amoeba-roles"
         )));
         assert!(is_gateway_identity_header(&HeaderName::from_static(
             "x-amoeba-secret-api_key"
@@ -539,7 +562,7 @@ mod tests {
     fn leaves_request_untouched_without_upstream_auth() {
         let cfg = base_service_cfg(None);
         let client = reqwest::Client::new();
-        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
+        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).unwrap();
         let built = req.build().unwrap();
         assert!(built.headers().get(AUTHORIZATION).is_none());
     }
@@ -554,7 +577,7 @@ mod tests {
         }));
 
         let client = reqwest::Client::new();
-        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
+        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).unwrap();
         let built = req.build().unwrap();
 
         assert_eq!(
@@ -573,12 +596,41 @@ mod tests {
         }));
 
         let client = reqwest::Client::new();
-        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg);
+        let req = apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).unwrap();
         let built = req.build().unwrap();
 
         assert_eq!(
             built.headers().get("X-Internal-Key").unwrap(),
             "internal-key"
         );
+    }
+
+    // @lat: [[gateway#Upstream credentials#Fails closed]]
+    #[test]
+    fn upstream_auth_fails_closed_without_a_token() {
+        let client = reqwest::Client::new();
+        let auth = |r#type: &str, env: Option<&str>, header: Option<&str>| {
+            base_service_cfg(Some(UpstreamAuth {
+                r#type: r#type.into(),
+                token_env_var: env.map(str::to_string),
+                header_name: header.map(str::to_string),
+            }))
+        };
+        unsafe { std::env::remove_var("AMOEBA_TEST_UNSET_TOKEN") };
+        unsafe { std::env::set_var("AMOEBA_TEST_EMPTY_TOKEN", "") };
+        for cfg in [
+            auth("bearer_static", Some("AMOEBA_TEST_UNSET_TOKEN"), None),
+            auth("bearer_static", Some("AMOEBA_TEST_EMPTY_TOKEN"), None),
+            auth("bearer_static", None, None),
+            auth(
+                "custom_header",
+                Some("AMOEBA_TEST_UNSET_TOKEN"),
+                Some("X-Key"),
+            ),
+            auth("custom_header", Some("AMOEBA_TEST_EMPTY_TOKEN"), None),
+            auth("oauth_magic", Some("AMOEBA_TEST_EMPTY_TOKEN"), None),
+        ] {
+            assert!(apply_upstream_auth(client.get("http://127.0.0.1:8080/x"), &cfg).is_err());
+        }
     }
 }
