@@ -111,7 +111,7 @@ Amoeba is designed for environments where you want control without operational o
 | Scale-to-zero for single containers and compose stacks, capacity budgets | Shipped |
 | Streaming responses (SSE, Streamable HTTP for MCP) | Shipped |
 | App packages, web console deploys, source builds, `amoeba-mcp` | Shipped |
-| [Database service](#8-database-service-planned): approved queries, table CRUD, column masking | Planned, in design |
+| [Database service](#8-database-service) (PostgreSQL): approved queries, table CRUD, column masking, MCP tools | Shipped |
 | Pluggable secret backends (Vault, HTTP provider) | Planned |
 | External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned |
 
@@ -933,18 +933,16 @@ The proxy also supports **streaming responses** (SSE, MCP Streamable HTTP, and a
 
 ---
 
-## 8. Database Service (planned)
-
-> **Status: in design, not yet shipped.** This section describes the intended behaviour so it can be reviewed early. The config shapes below are proposals and may change. The gateway features it depends on (path-based operation rules and the `x-amoeba-roles` header) are already shipped.
+## 8. Database Service
 
 The database is the system agents most often need and the one a security team is least willing to open. The usual choices are to hand a service the database password, or to write and review a new API for every question someone wants to ask.
 
-The database service is a third option: one generic, reviewed service holds the connection, and everything callers can do is an **approved definition** — a named query or a table opened for specific operations. No caller ever sends SQL, and no other service ever holds the password.
+The database service (`amoeba-db`, in `services/amoeba-db/`) is a third option: one generic, reviewed service holds the connection, and everything callers can do is an **approved definition**, either a named query or a table opened for specific operations. No caller ever sends SQL, and no other service ever holds the password. It supports PostgreSQL.
 
 ### 8.1 How it works
 
 ```
-agent ──► Amoeba ──► database service ──► your database
+agent ──► Amoeba ──► database service ──► PostgreSQL
            │              │
            │              ├─ runs only approved definitions, with bound parameters
            │              ├─ applies the column policy for the caller's roles
@@ -952,36 +950,55 @@ agent ──► Amoeba ──► database service ──► your database
            └─ checks the caller's roles for this table or query
 ```
 
-- **Definitions are data, not code.** Adding a query is a config change that the service hot-loads. The service binary is reviewed once; each definition is a few lines that a data owner can approve.
-- **One service per database credential, not per query.** A thousand queries against one database run in one service with one connection pool. Separate databases get separate services, so a fault in one cannot reach another's connection.
-- **It scales to zero** like any other Amoeba service: it wakes on the first call and stops when idle.
-- **It is an installable app package**, not part of the gateway binary, so the gateway stays small.
+- **Definitions are data, not code.** They are a JSON document (`DB_DEFINITIONS_FILE`, re-read when it changes, or `DB_DEFINITIONS`). The service binary is reviewed once; each definition is a few lines that a data owner can approve. An invalid edit is logged and the previous definitions stay in force.
+- **One service per database credential, not per query.** Separate databases get separate services, so a fault in one cannot reach another's connection.
+- **It scales to zero** like any other Amoeba service.
+- **It is an installable app package** (image `ghcr.io/dickyj-grc/amoeba-db`), not part of the gateway binary.
 
 ### 8.2 Routes
 
 ```
-GET    /v1/<db>/tables/loans?status=overdue    select
-GET    /v1/<db>/tables/loans/42                select one
-POST   /v1/<db>/tables/loans                   create   (JSON body)
+GET    /v1/<db>/tables/loans?status=overdue    select (equality filters, limit, offset)
+GET    /v1/<db>/tables/loans/42                select one by key
+POST   /v1/<db>/tables/loans                   insert   (JSON body)
 PATCH  /v1/<db>/tables/loans/42                update   (JSON body)
 DELETE /v1/<db>/tables/loans/42                delete
 
 POST   /v1/<db>/queries/overdue-loans          run a named query (JSON parameters)
+POST   /v1/<db>/mcp                            MCP: the definitions above as tools
 ```
 
-For plain table access nobody writes SQL: you open a table for the operations you want and the service generates the definitions from the table's columns. Named queries cover reports and joins.
+For plain table access nobody writes SQL: you open a table for the operations you want and the service generates the statements. Named queries cover reports and joins. Every definition the caller's roles may use is also an MCP tool (`query_<name>`, `<table>_list`, `_get`, `_insert`, `_update`, `_delete`), so an agent sees only the tools it may use.
 
-Each approved definition is also listed as an MCP tool, filtered by the caller's roles, so an agent sees only the tools it may use.
-
-### 8.3 A named query
+### 8.3 Definitions
 
 ```json
 {
-  "name": "overdue-loans",
-  "mode": "read",
-  "sql": "SELECT id, customer_id, amount, due_date FROM loans WHERE status = 'overdue' AND branch = $1",
-  "params": [{ "name": "branch", "type": "text" }],
-  "row_limit": 500
+  "schema": "public",
+  "statement_timeout_ms": 5000,
+  "tables": {
+    "customers": {
+      "key": "id",
+      "org_column": "org_id",
+      "operations": { "select": ["cs_agent", "compliance"], "update": ["compliance"] },
+      "columns": {
+        "id":      { "default": "show" },
+        "name":    { "default": "show" },
+        "nik":     { "mask": ["cs_agent"], "show": ["compliance"] },
+        "balance": { "show": ["compliance"] }
+      }
+    }
+  },
+  "queries": {
+    "overdue-loans": {
+      "mode": "read",
+      "sql": "SELECT id, branch, amount, due_date FROM loans WHERE status = 'overdue' AND branch = $1",
+      "params": [{ "name": "branch", "type": "text" }],
+      "row_limit": 500,
+      "roles": ["analyst"],
+      "columns": { "id": { "default": "show" }, "branch": { "default": "show" }, "amount": { "mask": ["analyst"], "show": ["finance"] }, "due_date": { "default": "show" } }
+    }
+  }
 }
 ```
 
@@ -992,75 +1009,68 @@ curl -X POST https://gateway.example.com/v1/finance-db/queries/overdue-loans \
   -d '{"branch": "JKT-01"}'
 ```
 
-The caller supplies a query name and values. The SQL text comes only from the approved definition, and values are always bound parameters, never pasted into the SQL.
+- **Tables:** `operations` maps each opened operation to roles (`"*"` means any caller). `key` addresses one row. `row_limit` caps a select (default 500), and `write_row_limit` caps an update or delete (default 1). `org_column` limits rows to the caller's organization: reads filter on it, inserts fill it in, and nobody can set it.
+- **Queries:** `mode` is `read` or `write`. `params` (`text`, `integer`, `number` or `boolean`) bind to `$1..$n` in order and arrive as text, so cast where you need another type (`$1::int`). A read query must list its output `columns`, since columns are closed unless listed. A write query returns `rows_affected`.
+- **Validation at load:** names must be lowercase identifiers, placeholders must match the declared params, and unknown fields are rejected.
 
 ### 8.4 Guardrails
 
 | Guardrail | What it prevents |
 |---|---|
-| Callers send a name and values, never SQL | SQL injection |
-| Read definitions run in a read-only transaction, on a read-only database account | A "read" that writes |
-| Writes use a separate account with rights only on tables opened for writing | Writes outside the approved tables |
-| Row limit on every definition; a write that touches more rows than its limit is rolled back | Bulk reads, and an update meant for one row that matches thousands |
-| Statement timeout | A query that ties up the database |
-| The caller's organization comes from the verified token and is set for row-level security | One tenant reading or writing another tenant's rows |
+| Callers send a name and values, never SQL; values are always bound parameters | SQL injection |
+| Read definitions run in a `READ ONLY` transaction, on `DATABASE_URL_READ` if set | A "read" that writes |
+| Writes use `DATABASE_URL_WRITE` if set, so that account can have rights only on writable tables | Writes outside the approved tables |
+| Row limit on every definition; a write that touches more rows than its limit is rolled back (409) | Bulk reads, and an update meant for one row that matches thousands |
+| `statement_timeout` per transaction (504 when exceeded) | A query that ties up the database |
+| The caller's organization, from the verified token, is set as `app.org` for `org_column` filters and row-level security policies | One tenant reading or writing another tenant's rows |
 | Tables and columns are closed until explicitly opened | A new column becoming visible by accident |
-| One audit record per call: user, definition, parameters, rows affected | Untraceable access |
+| One audit record per call (log target `amoeba_db_audit`): user, org, roles, definition, parameters, rows, status | Untraceable access |
+
+Values written to a table are left out of the audit record (only their column names are kept), since those are often the sensitive part.
 
 ### 8.5 Column policy: show, mask, or hide per role
 
 Access to an endpoint and access to a column are separate decisions. The gateway decides whether a caller may use `tables/customers` at all; the database service decides which columns that caller gets back.
 
-```json
-{
-  "table": "customers",
-  "columns": {
-    "id":      { "default": "show" },
-    "name":    { "default": "show" },
-    "nik":     { "default": "hide", "mask": ["cs_agent"], "show": ["compliance"] },
-    "balance": { "default": "hide", "show": ["finance", "compliance"] }
-  }
-}
-```
-
-With this policy, a `cs_agent` calling `GET /v1/crm-db/tables/customers/42` gets `id`, `name`, and a masked `nik`. A `compliance` caller using the same URL gets every column. Masking is applied in the SQL the service generates, so a value the caller is not entitled to never leaves the database.
+With the policy in 8.3, a `cs_agent` calling `GET /v1/finance-db/tables/customers/1` gets `id`, `name`, and `nik` as `************8901`. A `compliance` caller using the same URL gets every column. Masking is applied in the SQL the service generates (all but the last four characters are starred), so a value the caller is not entitled to never leaves the database.
 
 - The default is `hide`.
 - When a caller has several roles, the most permissive one applies.
-- The policy applies to writes too: an update that names a column the caller cannot see is rejected.
+- Writes may name only columns the caller sees in full.
+- Filters are allowed only on columns the caller sees in full, since filtering on a masked column would reveal it one guess at a time.
 
-### 8.6 What the gateway already provides
+### 8.6 Installing it
 
-The access rules for the database service use features that are shipped today. Path rules give each table and query its own operation name, and `permissions` maps those names to roles:
+`examples/app-packages/finance-db` is a working package with demo data (`demo.sql`):
 
-```json
-"finance-db": {
-  "placement": { "type": "vm", "ip": "finance-db", "port": 8080, "cooldown_seconds": 300 },
-  "container": { "image": "<database-service-image>" },
-  "operation_rules": [
-    { "operation": "loans.create", "match_type": "path", "path": "tables/loans",          "values": ["POST"] },
-    { "operation": "loans.read",   "match_type": "path", "path": "tables/loans/**",       "values": ["GET", "HEAD"] },
-    { "operation": "loans.update", "match_type": "path", "path": "tables/loans/{id}",     "values": ["PATCH"] },
-    { "operation": "reports.run",  "match_type": "path", "path": "queries/overdue-loans", "values": ["POST"] }
-  ],
-  "permissions": {
-    "loans.read":   ["analyst", "loan_officer"],
-    "loans.create": ["loan_officer"],
-    "loans.update": ["loan_officer"],
-    "reports.run":  ["analyst"]
-  },
-  "env_from_secret": { "DATABASE_URL": "finance-db/DATABASE_URL" }
-}
+- **Connection string:** a secret, `DATABASE_URL`, so only the database service's container receives it.
+- **Definitions:** shipped as the `DB_DEFINITIONS` env default. Override it at install to use your own.
+- **Gateway access rules:** `operation_rules` give each table and query its own operation name, and `permissions` map those names to roles:
+
+```yaml
+operation_rules:
+  - { operation: customers.read,  match_type: path, path: "tables/customers/**", values: [GET] }
+  - { operation: customers.write, match_type: path, path: "tables/customers/**", values: [POST, PATCH, DELETE] }
+  - { operation: reports.run,     match_type: path, path: "queries/**",          values: [POST] }
+  - { operation: mcp,             match_type: path, path: mcp,                   values: [POST] }
+permissions:
+  customers.read:  [cs_agent, compliance]
+  customers.write: [compliance]
+  reports.run:     [analyst, compliance]
+  mcp:             [analyst, cs_agent, compliance]
 ```
 
-The service reads the caller's verified identity from `x-amoeba-user`, `x-amoeba-org`, and `x-amoeba-roles`, which the gateway sets from the token and which a client cannot forge.
+```bash
+cd examples/app-packages/finance-db && zip -r /tmp/finance-db.zip amoeba.yaml && cd -
+curl -X POST http://localhost:8064/admin/apps \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -F package=@/tmp/finance-db.zip \
+  -F 'values={"secrets":{"DATABASE_URL":"postgres://reader:...@db-host:5432/finance"}}'
+```
 
-### 8.7 Open questions
+The service reads the caller's verified identity from `x-amoeba-user`, `x-amoeba-org`, and `x-amoeba-roles`, which the gateway sets from the token and a client cannot forge. Keep the service reachable only through the gateway: a request without those headers has no roles.
 
-- **Which databases.** PostgreSQL is the first target. The design leans on PostgreSQL features (JSON aggregation, row-level security), so other engines need their own work.
-- **Where definitions are stored and approved.** The service only needs a store it can load from; the approval workflow in front of it is up to the operator.
-
-Feedback on this design is welcome in the issue tracker.
+**Current limits:** PostgreSQL only; connections are unencrypted (no TLS to the database yet), so keep the database on a private network; filters are equality only.
 
 ---
 

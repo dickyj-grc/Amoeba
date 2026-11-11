@@ -19,6 +19,12 @@ Pattern syntax ([[src/routing/operation.rs#path_matches]]): `{name}` and `*` mat
 
 Rules are validated at load by [[src/routing/operation.rs#validate_operation_rules]], called from [[src/config/watcher.rs#validate_service_access]], so a typo fails the reload rather than silently never matching. Order matters: put specific rules before broad ones.
 
+### From an app package
+
+An app manifest can declare `operation_rules` with the same shape. Install copies them into the service's catalog entry and validates them, so a bad pattern fails the install.
+
+This is how the database service package gives each table and query its own operation name for `permissions`. See [[database#Gateway setup]].
+
 ## Caller identity
 
 The gateway forwards who is calling as headers derived from the verified token, never from the client. Client-supplied copies are stripped.

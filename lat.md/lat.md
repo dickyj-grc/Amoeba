@@ -5,3 +5,4 @@ This directory defines the high-level concepts, business logic, and architecture
 - [[deploy]] — Console deploy flow and building images from a Git repo or Dockerfile on the Amoeba host.
 - [[e2e]] — How the nightly DigitalOcean e2e picks the commit and orchestrator image it tests.
 - [[dev]] — Running Amoeba locally with `scripts/dev.sh`: native mode on macOS with Apple containers, or Docker Compose.
+- [[database]] — The database service: approved tables and queries over PostgreSQL with per-role column masking, guardrails and MCP tools.
