@@ -2,6 +2,7 @@
 //! Packages. These routes are gated by the same admin role middleware as
 //! `/admin/users`.
 
+use crate::apps::build::{BuildRequest, build_image, validate_image_name};
 use crate::apps::manager::{AppManager, AppManagerError, spawn_readiness_probe};
 use crate::apps::schema::{InstallValues, PolicyPatch};
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
@@ -236,6 +237,53 @@ fn token_org(
         return Ok(Some(tenant.clone()));
     }
     Ok(requested)
+}
+
+#[derive(Serialize)]
+pub struct BuildResponse {
+    pub image: String,
+    pub log: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct BuildErrorResponse {
+    pub error: String,
+    pub log: Vec<String>,
+}
+
+/// Builds an image for `name` from a Git repository or a Dockerfile and
+/// returns its tag, which the caller then installs as an image app. Bad input
+/// is 400; a failed clone or build is 422 with the build log.
+pub async fn build_app_image(
+    Path(name): Path<String>,
+    Json(request): Json<BuildRequest>,
+) -> Result<Json<BuildResponse>, (StatusCode, Json<BuildErrorResponse>)> {
+    let bad_request = |error: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(BuildErrorResponse {
+                error,
+                log: Vec::new(),
+            }),
+        )
+    };
+    validate_image_name(&name).map_err(bad_request)?;
+    request.validate().map_err(bad_request)?;
+
+    let registry = std::env::var("AMOEBA_REGISTRY").ok();
+    match build_image(&name, &request, registry.as_deref()).await {
+        Ok(outcome) => Ok(Json(BuildResponse {
+            image: outcome.image,
+            log: outcome.log,
+        })),
+        Err(failure) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(BuildErrorResponse {
+                error: failure.message,
+                log: failure.log,
+            }),
+        )),
+    }
 }
 
 fn app_manager(state: &AppState) -> AppManager {

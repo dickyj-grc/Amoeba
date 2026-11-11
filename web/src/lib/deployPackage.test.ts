@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BuildError,
   buildDeployForm,
+  buildRequestFor,
+  requestBuild,
+  validateServiceName,
   buildInstallValues,
   buildManifest,
   buildZip,
@@ -88,5 +92,58 @@ describe('deploy package', () => {
       { name: 'b.txt', data: new TextEncoder().encode('beta') },
     ]);
     expect(readZip(zip)).toEqual({ 'a.txt': 'alpha', 'b.txt': 'beta' });
+  });
+});
+
+describe('source builds', () => {
+  it('maps each tab to a build request', () => {
+    const fields = { gitUrl: ' https://github.com/a/b.git ', dockerfile: 'FROM x', contextUrl: '' };
+    expect(buildRequestFor('git', fields)).toEqual({ source: 'git', url: 'https://github.com/a/b.git' });
+    expect(buildRequestFor('dockerfile', fields)).toEqual({ source: 'dockerfile', dockerfile: 'FROM x' });
+    expect(
+      buildRequestFor('dockerfile', { ...fields, contextUrl: 'https://github.com/a/b.git' }),
+    ).toEqual({ source: 'dockerfile', dockerfile: 'FROM x', context_url: 'https://github.com/a/b.git' });
+    expect(buildRequestFor('image', fields)).toBeNull();
+  });
+
+  it('requires a lowercase service name', () => {
+    expect(validateServiceName('pdf-parser')).toBeNull();
+    expect(validateServiceName('PdfParser')).not.toBeNull();
+    expect(validateServiceName('a/b')).not.toBeNull();
+  });
+
+  // @lat: [[deploy#Source builds#Console flow]]
+  it('posts the build and returns the image tag', async () => {
+    const calls: [string, RequestInit][] = [];
+    const ok: typeof fetch = async (url, init) => {
+      calls.push([url as string, init!]);
+      return new Response(JSON.stringify({ image: 'amoeba/api:latest', log: [] }));
+    };
+    const image = await requestBuild('api', { source: 'git', url: 'https://x/y.git' }, 'tok', ok);
+    expect(image).toBe('amoeba/api:latest');
+    expect(calls[0][0]).toBe('/admin/apps/api/build');
+    expect(calls[0][1].method).toBe('POST');
+    expect((calls[0][1].headers as Record<string, string>).Authorization).toBe('Bearer tok');
+    expect(JSON.parse(calls[0][1].body as string)).toEqual({ source: 'git', url: 'https://x/y.git' });
+  });
+
+  it('surfaces the build log when the build fails', async () => {
+    const failing: typeof fetch = async () =>
+      new Response(JSON.stringify({ error: 'build failed: docker exited with code 1', log: ['step 1', 'boom'] }), {
+        status: 422,
+      });
+    const err = await requestBuild('api', { source: 'dockerfile', dockerfile: 'FROM x' }, 'tok', failing).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(BuildError);
+    expect(err.message).toContain('docker exited');
+    expect(err.log).toEqual(['step 1', 'boom']);
+
+    const forbidden: typeof fetch = async () => new Response('Forbidden', { status: 403 });
+    const err2 = await requestBuild('api', { source: 'git', url: 'https://x/y.git' }, 'tok', forbidden).catch(
+      (e) => e,
+    );
+    expect(err2.message).toBe('Forbidden');
+    expect(err2.log).toEqual([]);
   });
 });

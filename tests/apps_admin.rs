@@ -4,7 +4,7 @@
 use amoeba::auth::jwt::local_engine;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::routing::apps_admin::{
-    install_app, issue_service_token, list_apps, uninstall_app, update_app_policy,
+    build_app_image, install_app, issue_service_token, list_apps, uninstall_app, update_app_policy,
 };
 use amoeba::state::AppState;
 use axum::{
@@ -68,6 +68,7 @@ fn build_app(catalog_path: &str) -> Router {
             "/apps/:name",
             delete(uninstall_app).patch(update_app_policy),
         )
+        .route("/apps/:name/build", post(build_app_image))
         .route("/apps/:name/token", post(issue_service_token))
         .route_layer(middleware::from_fn(require_admin_role))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024));
@@ -333,4 +334,57 @@ async fn policy_patch_switches_a_service_to_per_org_permissions() {
     assert!(service["tenant_permissions"]["org_client_alpha"]["add"].is_null());
 
     std::fs::remove_file(&catalog).ok();
+}
+
+fn build_request(token: &str, name: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/admin/apps/{name}/build"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+// @lat: [[deploy#Source builds#Input checks]]
+#[tokio::test]
+async fn build_endpoint_is_admin_only_and_rejects_unsafe_input_before_running_anything() {
+    let app = build_app(&temp_catalog_path("build"));
+    let admin = token_with_roles(&["admin"]);
+    let git = r#"{"source":"git","url":"https://github.com/acme/api.git"}"#;
+
+    let res = app
+        .clone()
+        .oneshot(build_request(&token_with_roles(&["analyst"]), "api", git))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    for (name, body) in [
+        ("Api", git),
+        ("api", r#"{"source":"git","url":"file:///etc"}"#),
+        (
+            "api",
+            r#"{"source":"git","url":"https://x/y.git","ref":"--upload-pack=x"}"#,
+        ),
+        ("api", r#"{"source":"dockerfile","dockerfile":""}"#),
+        (
+            "api",
+            r#"{"source":"dockerfile","dockerfile":"FROM x","context_url":"ext::sh"}"#,
+        ),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(build_request(&admin, name, body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{name} {body}");
+    }
+
+    // An unknown source kind fails JSON parsing.
+    let res = app
+        .oneshot(build_request(&admin, "api", r#"{"source":"tarball"}"#))
+        .await
+        .unwrap();
+    assert!(res.status().is_client_error());
 }

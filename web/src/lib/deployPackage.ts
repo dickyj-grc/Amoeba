@@ -154,3 +154,72 @@ export function buildZip(files: { name: string; data: Uint8Array }[]): Uint8Arra
   }
   return out;
 }
+
+// Source builds: POST /admin/apps/<name>/build turns a Git repo or a pasted
+// Dockerfile into an image on the Amoeba host; the deploy then runs that image.
+
+export type BuildRequest =
+  | { source: 'git'; url: string; ref?: string }
+  | { source: 'dockerfile'; dockerfile: string; context_url?: string };
+
+export interface BuildFailure {
+  error: string;
+  log: string[];
+}
+
+/** Lowercase because the name becomes the image tag `amoeba/<name>:latest`. */
+export function validateServiceName(name: string): string | null {
+  return /^[a-z0-9][a-z0-9._-]{0,127}$/.test(name)
+    ? null
+    : 'Service name must use lowercase letters, digits, "-", "_" or "." and start with a letter or digit';
+}
+
+export function buildRequestFor(
+  tab: 'git' | 'dockerfile' | 'image',
+  fields: { gitUrl: string; dockerfile: string; contextUrl: string },
+): BuildRequest | null {
+  switch (tab) {
+    case 'git':
+      return { source: 'git', url: fields.gitUrl.trim() };
+    case 'dockerfile': {
+      const contextUrl = fields.contextUrl.trim();
+      return contextUrl
+        ? { source: 'dockerfile', dockerfile: fields.dockerfile, context_url: contextUrl }
+        : { source: 'dockerfile', dockerfile: fields.dockerfile };
+    }
+    case 'image':
+      return null;
+  }
+}
+
+/** Runs the build and returns the image tag; throws a BuildError with the log on failure. */
+export async function requestBuild(
+  name: string,
+  request: BuildRequest,
+  token: string | null,
+  fetchFn: typeof fetch = fetch,
+): Promise<string> {
+  const res = await fetchFn(`/admin/apps/${encodeURIComponent(name)}/build`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(request),
+  });
+  const text = await res.text();
+  let body: any = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Non-JSON error (e.g. 403 from the auth layer); report the raw text.
+  }
+  if (!res.ok) {
+    throw new BuildError(body?.error || text || `Build failed with status ${res.status}`, body?.log ?? []);
+  }
+  return body.image as string;
+}
+
+export class BuildError extends Error {
+  constructor(message: string, public log: string[]) {
+    super(message);
+    this.name = 'BuildError';
+  }
+}
