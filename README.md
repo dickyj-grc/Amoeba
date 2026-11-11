@@ -119,6 +119,47 @@ Amoeba is designed for environments where you want control without operational o
 
 ---
 
+## Run Locally
+
+One command starts Amoeba and the web console on your machine:
+
+```bash
+git clone https://github.com/dickyj-grc/Amoeba.git && cd Amoeba
+scripts/dev.sh
+```
+
+```text
+  API:      http://localhost:8064
+  Console:  http://localhost:3064
+  User:     admin
+  Password: <printed on first run>
+```
+
+On first run it creates `.env` with a random JWT secret, an empty service catalog, and an `admin` user. It prints that user's password, which is also saved in the mode's state directory as `.dev-admin-password`. The console stays in the foreground; Ctrl-C stops it, and the API keeps running.
+
+The script picks a mode for your machine:
+
+| Mode | When | How apps run | State |
+|---|---|---|---|
+| **native** | macOS with Apple's [`container`](https://github.com/apple/container) CLI and a Rust toolchain | Amoeba runs as a native binary; each app is an Apple `container` micro-VM. No Docker Desktop VM, no x86 emulation. | `.dev/native/` |
+| **docker** | everywhere else | The orchestrator runs in Docker Compose and starts apps as Docker containers. | `config/` |
+
+Compose-based apps (such as the Obscura and hello-world examples) need Docker, so use `--docker` for those even on a Mac.
+
+| Command | Does |
+|---|---|
+| `scripts/dev.sh --down` | Stop the API and the app containers it started |
+| `scripts/dev.sh --no-console` | Start only the API |
+| `scripts/dev.sh --reset-admin` | Give `admin` a new random password |
+| `scripts/dev.sh --docker` / `--native` | Override the mode |
+| `scripts/dev.sh --build` | Docker mode: build the image from your checkout instead of pulling `ghcr.io/dickyj-grc/amoeba:latest` (amd64 only, emulated on Apple Silicon) |
+
+Logs are in `.dev/native/amoeba.log` (native) or `docker logs -f amoeba-orchestrator` (docker). To try it, sign in to the console and deploy an image, or install an app package with the admin API ([7.2](#72-install-and-uninstall-via-curl)) using a token from `POST /auth/login`. Those examples use the server's default port 8080; under `scripts/dev.sh` use `localhost:8064`.
+
+For a production setup with Caddy and TLS, see [5. Deployment](#5-deployment-docker-compose).
+
+---
+
 ## 1. System Architecture Overview
 
 The system follows a two-tier architecture: **Edge Reverse Proxy Layer** (public-facing) and **Compute Orchestrator Layer** (internal control plane).
@@ -299,6 +340,8 @@ A machine's `drivers` list picks which backend drives its `container`-workload s
 ```
 
 See `config/services.applecontainer.example.json`. Note what's *missing*: **`placement.ip` is omitted, and validation requires it stay that way** for a `container` workload on an `apple-container` machine. Apple's `container` tool assigns each container a fresh IP on every start (confirmed by hand: stopping and restarting the same container moved it from `192.168.64.2` to `192.168.64.3`), and — unlike a Docker container on a shared bridge network — the bare macOS process running Amoeba can't resolve it by name; there's no DNS between the host and a `container`-managed VM. So the upstream host isn't a static config value here: Amoeba resolves it dynamically after every cold-boot (`container inspect`) and caches it in memory for warm requests to reuse, re-resolving again the next time the service cold-boots.
+
+To try this on a Mac without writing the catalog yourself, run `scripts/dev.sh` (see [Run Locally](#run-locally)); it picks this driver automatically.
 
 `stack_spec` (2.2) has no `apple-container` equivalent yet — Apple's CLI has no compose-like multi-container orchestration today, so multi-container stacks always go through `docker compose` regardless of a machine's `drivers`.
 
