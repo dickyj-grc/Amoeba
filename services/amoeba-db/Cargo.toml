@@ -1,6 +1,6 @@
 [package]
 name = "amoeba-db"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2024"
 description = "Database service for Amoeba: approved queries and table access with per-role column policy (PostgreSQL)"
 license = "MIT"
