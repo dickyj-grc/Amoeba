@@ -9,17 +9,12 @@ import {
   Trash,
   X,
 } from 'lucide-react';
+import { buildDeployForm, type EnvPair } from '../lib/deployPackage';
 
 interface DeployModalProps {
   isOpen: boolean;
   onClose: () => void;
   onDeploySuccess: () => void;
-}
-
-interface EnvPair {
-  key: string;
-  value: string;
-  isSecret: boolean;
 }
 
 export const DeployModal: React.FC<DeployModalProps> = ({
@@ -69,56 +64,17 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     setIsSubmitting(true);
     setError(null);
 
-    const envMap: Record<string, string> = {};
-    const secretsMap: Record<string, string> = {};
-
-    envPairs.forEach((pair) => {
-      if (pair.key.trim()) {
-        if (pair.isSecret) {
-          secretsMap[pair.key.trim()] = pair.value;
-        } else {
-          envMap[pair.key.trim()] = pair.value;
-        }
-      }
-    });
-
     try {
-      // In a real deployment, if using MCP or direct orchestrator endpoint:
-      // Note: If using the admin API directly or through an MCP bridge
-      const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
-      
-      // Let's create a single-service package manifest for the app manager
-      const appPackage = {
+      const formData = buildDeployForm({
         name: name.trim(),
-        version: "1.0.0",
-        description: `Deployed via Amoeba Web UI (${activeTab})`,
         image: activeTab === 'image' ? dockerImage.trim() : `amoeba/${name.trim()}:latest`,
+        description: `Deployed via Amoeba Web UI (${activeTab})`,
         port: Number(port),
-        cooldown_seconds: Number(cooldown),
-        public: isPublic,
-        env: envMap,
-        secrets: secretsMap,
-      };
-
-      // Create FormData to send to /admin/apps
-      const formData = new FormData();
-      // Generate a lightweight JSON package blob
-      const manifestJson = JSON.stringify({
-        schema_version: "1",
-        service: {
-          name: name.trim(),
-          version: "1.0.0",
-          description: `Deployed via Amoeba Web UI (${activeTab})`,
-          port: Number(port),
-          cooldown_seconds: Number(cooldown),
-          image: activeTab === 'image' ? dockerImage.trim() : `amoeba/${name.trim()}:latest`,
-          public: isPublic,
-          env: envMap,
-        }
+        cooldownSeconds: Number(cooldown),
+        isPublic,
+        envPairs,
       });
-      
-      formData.append("package", new Blob([manifestJson], { type: "application/json" }), "app.json");
-      formData.append("values", JSON.stringify({}));
+      const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
 
       const res = await fetch('/admin/apps', {
         method: 'POST',

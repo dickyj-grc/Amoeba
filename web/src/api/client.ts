@@ -95,7 +95,7 @@ class AmoebaApiClient {
           return {
             name,
             state: {
-              phase: 'Cold',
+              phase: 'Cold' as const,
               generation: 0,
               observed_generation: 0,
               ready: false,

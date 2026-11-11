@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   ExternalLink,
-  Flame,
   Key,
   Moon,
   Play,
@@ -47,7 +46,7 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
     }
   };
 
-  const renderStatusBadge = (phase: string, healthy: boolean) => {
+  const renderStatusBadge = (phase: string) => {
     switch (phase) {
       case 'Warm':
         return (
@@ -156,7 +155,7 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
                     </div>
                   </td>
                   <td className="py-3.5 px-4">
-                    {renderStatusBadge(service.state.phase, service.state.healthy)}
+                    {renderStatusBadge(service.state.phase)}
                   </td>
                   <td className="py-3.5 px-4">
                     <a
