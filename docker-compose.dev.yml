@@ -1,0 +1,7 @@
+# Local development overlay used by scripts/dev.sh. Runs only the orchestrator
+# (no Caddy, no TLS) and publishes it on 127.0.0.1:8064, which is where the web
+# console's dev server (web/vite.config.ts) sends /auth and /admin requests.
+services:
+  orchestrator:
+    ports:
+      - "127.0.0.1:8064:8080"

@@ -10,18 +10,19 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    // Ports match scripts/dev.sh: console on 3064, API on 8064.
+    port: 3064,
     proxy: {
       '/admin': {
-        target: 'http://127.0.0.1:8080',
+        target: 'http://127.0.0.1:8064',
         changeOrigin: true,
       },
       '/auth': {
-        target: 'http://127.0.0.1:8080',
+        target: 'http://127.0.0.1:8064',
         changeOrigin: true,
       },
       '/v1': {
-        target: 'http://127.0.0.1:8080',
+        target: 'http://127.0.0.1:8064',
         changeOrigin: true,
       },
     },

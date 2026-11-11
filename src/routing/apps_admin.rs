@@ -70,6 +70,7 @@ pub async fn install_app(
         .map_err(map_manager_error)?;
 
     let app_name = manifest.service_name().to_string();
+    reload_catalog(&state);
     let app_state = Arc::new(AppLifecycleState::installed());
     state.set_app_state(&app_name, app_state.clone());
     spawn_readiness_probe(state.clone(), app_name.clone());
@@ -137,6 +138,7 @@ pub async fn uninstall_app(
         .uninstall(&app_name)
         .await
         .map_err(map_manager_error)?;
+    reload_catalog(&state);
 
     // Remove the lifecycle state so the app no longer appears ready.
     let mut new_states = (*state.app_states.load().clone()).clone();
@@ -156,6 +158,7 @@ pub async fn update_app_policy(
         .update_policy(&app_name, patch)
         .await
         .map_err(map_manager_error)?;
+    reload_catalog(&state);
 
     let snapshot = state
         .app_state(&app_name)
@@ -301,5 +304,14 @@ fn map_manager_error(e: AppManagerError) -> (StatusCode, String) {
             (StatusCode::NOT_FOUND, msg.to_string())
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Applies the catalog the manager just wrote. The write already succeeded,
+/// so a failed re-read is logged rather than failing the request; the file
+/// watcher will still pick the change up.
+fn reload_catalog(state: &AppState) {
+    if let Err(e) = state.reload_catalog() {
+        tracing::warn!("catalog written but not reloaded: {e}");
     }
 }

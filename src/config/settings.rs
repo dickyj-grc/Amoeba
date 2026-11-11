@@ -7,6 +7,8 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/amoeba/config.toml";
+/// Service catalog path, overridable with `AMOEBA_SERVICES_FILE`.
+pub const DEFAULT_SERVICES_FILE: &str = "/etc/amoeba/services.json";
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 pub const DEFAULT_USERS_FILE: &str = "/etc/amoeba/users.json";
 pub const DEFAULT_REVOCATION_FILE: &str = "/etc/amoeba/revoked_tokens.json";

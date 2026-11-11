@@ -33,7 +33,7 @@ fn normalize_catalog(catalog: &mut ServiceCatalog) {
     }
 }
 
-fn validate_catalog(catalog: &ServiceCatalog) -> Result<(), String> {
+pub(crate) fn validate_catalog(catalog: &ServiceCatalog) -> Result<(), String> {
     validate_machine_references(catalog)?;
     validate_workload_exclusivity(catalog)?;
     validate_stack_spec_mode(catalog)?;
@@ -170,7 +170,7 @@ fn validate_stack_spec_mode(catalog: &ServiceCatalog) -> Result<(), String> {
 /// Whether `svc`'s machine lists `"apple-container"` among its `drivers`.
 /// Assumes `validate_machine_references` has already run (so `catalog.machines`
 /// lookups here are meaningful, not just defensively `None`-safe).
-fn service_uses_apple_container(
+pub(crate) fn service_uses_apple_container(
     svc: &super::schema::ServiceConfig,
     catalog: &ServiceCatalog,
 ) -> bool {
