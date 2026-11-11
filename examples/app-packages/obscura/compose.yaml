@@ -1,6 +1,8 @@
 services:
   obscura:
-    image: h4ckf0r0day/obscura:latest
+    # Pinned: an unpinned `latest` picked up 0.2.3's auth requirement silently
+    # and broke the nightly e2e. Bump deliberately.
+    image: h4ckf0r0day/obscura:0.2.6
     container_name: amoeba-obscura
     command:
       - mcp
@@ -9,6 +11,9 @@ services:
       - 0.0.0.0
       - --port
       - "3000"
+    environment:
+      # Passed through from Amoeba's compose environment (an installed secret).
+      - OBSCURA_MCP_TOKEN
     ports:
       - "3000"
     networks:

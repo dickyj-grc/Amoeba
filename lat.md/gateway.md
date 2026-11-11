@@ -29,7 +29,9 @@ Upstream services such as the database service rely on `x-amoeba-roles` for colu
 
 ## Upstream credentials
 
-`upstream_auth` injects a credential the caller never sees: `bearer_static` sets `Authorization: Bearer <token>`, `custom_header` sets `header_name: <token>`. The token is read from `token_env_var`.
+`upstream_auth` injects a credential the caller never sees: `bearer_static` sets `Authorization: Bearer <token>`, `custom_header` sets `header_name: <token>`.
+
+The token comes from `token_secret` (a `"<service>/<key>"` file in the secrets directory, read per request via [[src/lifecycle/driver.rs#resolve_secret_ref]]) when set, else from the `token_env_var` env var on the Amoeba process. App packages use `token_secret`; see [[secrets#Gateway credential from a secret]].
 
 Implemented by [[src/routing/proxy.rs#apply_upstream_auth]]. Per-request secret headers from `header_from_secret` are applied right after it.
 
@@ -37,4 +39,4 @@ Implemented by [[src/routing/proxy.rs#apply_upstream_auth]]. Per-request secret 
 
 A configured credential that cannot be produced rejects the request with `503` and `x-amoeba-rejection-reason: secret-unavailable` instead of forwarding.
 
-This covers an unset or empty env var, a missing `token_env_var` or `header_name`, an unknown `type`, or a value that is not a valid header. The old behaviour sent `Bearer ` with an empty token.
+This covers an unset or empty env var, a missing or empty `token_secret` file, a missing token source or `header_name`, an unknown `type`, or a value that is not a valid header. The old behaviour sent `Bearer ` with an empty token.

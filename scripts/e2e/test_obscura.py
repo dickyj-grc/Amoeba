@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 from pathlib import Path
 
 import requests
@@ -19,7 +21,8 @@ def _install_package(base_url: str, admin_token: str, package_dir: Path, app_nam
             f"{base_url}/admin/apps",
             headers=auth_header(admin_token),
             files={"package": (f"{app_name}.amoeba.zip", f, "application/zip")},
-            data={"values": "{}"},
+            # Obscura requires a 32+ byte token; Amoeba stores it and sends it upstream.
+            data={"values": json.dumps({"secrets": {"OBSCURA_MCP_TOKEN": secrets.token_hex(32)}})},
             timeout=30,
         )
     resp.raise_for_status()

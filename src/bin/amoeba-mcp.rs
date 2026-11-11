@@ -941,6 +941,7 @@ async fn install_app_on_amoeba(
         tenant: access.tenant.clone(),
         tenant_permissions: access.tenant_permissions.clone(),
         public,
+        upstream_auth: None,
         resources: if memory.is_some() || cpu_cores.is_some() {
             Some(amoeba::apps::schema::ResourceSpec {
                 memory: memory.map(|m| m.to_string()),

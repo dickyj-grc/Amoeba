@@ -12,6 +12,14 @@ A secret exists only if the app manifest declares it under `schema.secrets`. Eac
 
 The value comes from the `values.secrets` field of the install request, or from an age-encrypted file in the package (`file`) decrypted with `AMOEBA_AGE_SECRET_KEY`. A supplied value wins over the file.
 
+## Gateway credential from a secret
+
+An app that requires auth on every request gets it from one declared secret, used twice: the container receives it, and the gateway sends it upstream.
+
+The manifest's `upstream_auth: {type, secret, header_name?}` names a key in `schema.secrets`. Install checks the key is declared and the type is `bearer_static` or `custom_header` (which needs `header_name`). [[src/apps/manager.rs#build_service_config]] writes `upstream_auth.token_secret = "<app>/<key>"`, and the proxy reads that file per request. Callers still authenticate to Amoeba with their own JWT and never see the token.
+
+`examples/app-packages/obscura` uses this: Obscura 0.2.3+ exits at start unless `OBSCURA_MCP_TOKEN` (32+ bytes) is set, then requires `Authorization: Bearer` on every MCP call. The secret is declared with `inject: env` and a `^.{32,}$` pattern, and compose passes it through with `environment: [OBSCURA_MCP_TOKEN]`.
+
 ## Storage
 
 Each value is written to `<config dir>/secrets/<app>/<key>` with mode `0600`. The catalog stores only the `"<app>/<key>"` reference, never the value.
