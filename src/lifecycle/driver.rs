@@ -245,6 +245,7 @@ fn build_container_driver(
             container.image.clone(),
             memory_limit_mb,
             cpu_cores,
+            container.env.clone(),
             svc.env_from_secret.clone(),
         ));
     }

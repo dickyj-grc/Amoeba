@@ -25,6 +25,7 @@ pub struct AppleContainerDriver {
     image: String,
     memory_limit_mb: Option<u64>,
     cpu_cores: Option<u64>,
+    env: HashMap<String, String>,
     env_from_secret: HashMap<String, String>,
 }
 
@@ -34,6 +35,7 @@ impl AppleContainerDriver {
         image: String,
         memory_limit_mb: Option<u64>,
         cpu_cores: Option<u64>,
+        env: HashMap<String, String>,
         env_from_secret: HashMap<String, String>,
     ) -> Self {
         Self {
@@ -41,6 +43,7 @@ impl AppleContainerDriver {
             image,
             memory_limit_mb,
             cpu_cores,
+            env,
             env_from_secret,
         }
     }
@@ -82,7 +85,9 @@ impl AppleContainerDriver {
     }
 
     async fn create_and_start(&self) -> Result<(), DriverError> {
-        let env = resolve_env_from_secret(&self.env_from_secret)?;
+        // Same precedence as the Docker driver: a secret wins over a plain var.
+        let mut env = self.env.clone();
+        env.extend(resolve_env_from_secret(&self.env_from_secret)?);
 
         let mut args: Vec<String> = vec![
             "run".into(),

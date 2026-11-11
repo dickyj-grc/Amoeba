@@ -198,11 +198,19 @@ impl AppManager {
         let _guard = self.lock.lock().await;
         let mut catalog = load_catalog(&self.catalog_path)?;
         upsert_machine(&mut catalog);
-        let service_config = build_service_config(&manifest, &values, &self.stacks_dir());
+        let mut service_config = build_service_config(&manifest, &values, &self.stacks_dir());
+        // Apple containers get a fresh IP on every start, resolved by the
+        // driver, so their services must not name a host.
+        if crate::config::watcher::service_uses_apple_container(&service_config, &catalog) {
+            service_config.placement.ip = None;
+        }
         crate::config::watcher::validate_service_access(&app_name, &service_config)
             .map_err(AppManagerError::Validation)?;
         enforce_tenant_quota(&catalog, &app_name, &service_config)?;
         catalog.services.insert(app_name.clone(), service_config);
+        // Refuse to write a catalog the loader would reject: the gateway would
+        // keep serving the old one and the app would never appear.
+        crate::config::watcher::validate_catalog(&catalog).map_err(AppManagerError::Validation)?;
         save_catalog(&self.catalog_path, &catalog)?;
 
         info!(app = %app_name, "installed/updated Amoeba app package");
@@ -753,7 +761,11 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
             return;
         };
 
-        if let Err(e) = pull_images(&service_cfg).await {
+        let apple = crate::config::watcher::service_uses_apple_container(
+            &service_cfg,
+            &state.catalog.load(),
+        );
+        if let Err(e) = pull_images(&service_cfg, apple).await {
             app_state.transition(
                 LifecycleStatus::Error,
                 Some(format!("image pull failed: {e}")),
@@ -783,13 +795,16 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
             return;
         };
 
-        if let Err(e) = driver.ensure_started().await {
-            app_state.transition(
-                LifecycleStatus::Error,
-                Some(format!("failed to start: {e}")),
-            );
-            return;
-        }
+        let resolved_host = match driver.ensure_started().await {
+            Ok(host) => host,
+            Err(e) => {
+                app_state.transition(
+                    LifecycleStatus::Error,
+                    Some(format!("failed to start: {e}")),
+                );
+                return;
+            }
+        };
 
         // A reinstall reuses the existing `ServiceRuntimeState` entry (keyed by
         // app name, not container instance), so its `last_accessed_unix` can be
@@ -799,9 +814,16 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
         // before anyone ever gets to use it.
         if let Some(runtime) = state.runtime_states.load().get(&app_name) {
             runtime.touch();
+            if let Some(host) = &resolved_host {
+                runtime.set_resolved_host(host.clone());
+            }
         }
 
-        let host = service_cfg.upstream_host();
+        // Apple containers have no static host; the driver returns the IP it
+        // just resolved.
+        let host = resolved_host
+            .as_deref()
+            .unwrap_or_else(|| service_cfg.upstream_host());
         if !wait_until_ready(host, service_cfg.placement.port).await {
             app_state.transition(
                 LifecycleStatus::Error,
@@ -972,7 +994,26 @@ async fn local_image_present(image: &str) -> bool {
     }
 }
 
-async fn pull_images(service: &ServiceConfig) -> Result<(), AppManagerError> {
+/// `apple` selects Apple's `container` CLI, which keeps its own image store,
+/// instead of Docker.
+async fn pull_images(service: &ServiceConfig, apple: bool) -> Result<(), AppManagerError> {
+    if let (true, Some(container)) = (apple, &service.container) {
+        let output = Command::new("container")
+            .args(["image", "pull", &container.image])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(AppManagerError::Command(format!(
+                "container image pull {}: {}",
+                container.image,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        return Ok(());
+    }
     if let Some(container) = &service.container {
         if !crate::apps::deploy::should_pull_image(local_image_present(&container.image).await) {
             return Ok(());
@@ -1062,6 +1103,34 @@ schema:
       description: API token
       required: true
 "#
+    }
+
+    // @lat: [[dev#Native mode on macOS#Apple container installs]]
+    #[tokio::test]
+    async fn image_app_on_apple_container_machine_leaves_a_loadable_catalog() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        std::fs::write(
+            &catalog_path,
+            r#"{"version":1,"machines":{"local":{"type":"vm","drivers":["apple-container"],"resources":{}}},"services":{}}"#,
+        )
+        .unwrap();
+        let manager = AppManager::new(&catalog_path);
+        let values = InstallValues {
+            secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+            ..Default::default()
+        };
+
+        manager
+            .install(&package_zip_with_manifest(image_manifest()), values)
+            .await
+            .unwrap();
+
+        // The loader rejects placement.ip on apple-container machines; before
+        // the fix the install wrote one and the gateway silently kept the old
+        // catalog.
+        let catalog = load_catalog(&catalog_path).unwrap();
+        assert!(catalog.services["test-image"].placement.ip.is_none());
     }
 
     #[tokio::test]

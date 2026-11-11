@@ -29,6 +29,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub users_file: String,
     pub catalog_path: String,
+    config_dir: PathBuf,
+    docker: Option<Docker>,
 }
 
 impl AppState {
@@ -92,36 +94,54 @@ impl AppState {
             http_client,
             users_file: users_file.to_string(),
             catalog_path: config_path.to_string(),
+            config_dir,
+            docker,
         });
 
-        Self::watch_config(state.clone(), config_path.to_string(), config_dir, docker);
+        Self::watch_config(state.clone(), config_path.to_string());
         spawn_reaper_thread(state.clone());
         Self::spawn_initial_readiness_probes(state.clone());
 
         state
     }
 
-    fn watch_config(state: Arc<Self>, path: String, config_dir: PathBuf, docker: Option<Docker>) {
+    fn watch_config(state: Arc<Self>, path: String) {
         let owner = Arc::downgrade(&state);
         spawn_file_watcher(path, owner, move |new_catalog| {
-            let mut new_runtimes = (*state.runtime_states.load().clone()).clone();
-            let mut new_app_states = (*state.app_states.load().clone()).clone();
-            for key in new_catalog.services.keys() {
-                new_runtimes
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(ServiceRuntimeState::new()));
-                new_app_states
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(AppLifecycleState::installed()));
-            }
-
-            let new_drivers = driver::build_all(&new_catalog, &config_dir, docker.clone());
-
-            state.catalog.store(Arc::new(new_catalog));
-            state.runtime_states.store(Arc::new(new_runtimes));
-            state.app_states.store(Arc::new(new_app_states));
-            state.drivers.store(Arc::new(new_drivers));
+            state.apply_catalog(new_catalog)
         });
+    }
+
+    /// Re-reads the catalog file and applies it. Handlers that write the
+    /// catalog call this so the change is live before they respond, instead of
+    /// waiting for the file watcher, which can lag or (on some macOS setups)
+    /// never fire.
+    pub fn reload_catalog(&self) -> Result<(), String> {
+        let catalog = load_catalog(&self.catalog_path).map_err(|e| e.to_string())?;
+        self.apply_catalog(catalog);
+        Ok(())
+    }
+
+    /// Swaps in a new catalog, adding runtime and lifecycle state for new
+    /// services and rebuilding drivers.
+    fn apply_catalog(&self, new_catalog: ServiceCatalog) {
+        let mut new_runtimes = (*self.runtime_states.load().clone()).clone();
+        let mut new_app_states = (*self.app_states.load().clone()).clone();
+        for key in new_catalog.services.keys() {
+            new_runtimes
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(ServiceRuntimeState::new()));
+            new_app_states
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(AppLifecycleState::installed()));
+        }
+
+        let new_drivers = driver::build_all(&new_catalog, &self.config_dir, self.docker.clone());
+
+        self.catalog.store(Arc::new(new_catalog));
+        self.runtime_states.store(Arc::new(new_runtimes));
+        self.app_states.store(Arc::new(new_app_states));
+        self.drivers.store(Arc::new(new_drivers));
     }
 }
 

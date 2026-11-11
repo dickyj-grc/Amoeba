@@ -5,7 +5,8 @@ use amoeba::auth::revocation::RevocationStore;
 use amoeba::auth::{AuthMode, JwtEngine};
 use amoeba::config::settings::{
     AUTH_MODE_JWKS, AUTH_MODE_LOCAL_JWT, AmoebaConfig, AuthSettings, DEFAULT_BIND_ADDR,
-    DEFAULT_CONFIG_PATH, DEFAULT_REVOCATION_FILE, DEFAULT_USERS_FILE, ServerSettings,
+    DEFAULT_CONFIG_PATH, DEFAULT_REVOCATION_FILE, DEFAULT_SERVICES_FILE, DEFAULT_USERS_FILE,
+    ServerSettings,
 };
 use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::apps_admin::{
@@ -110,9 +111,12 @@ async fn main() {
         _ => unreachable!("AmoebaConfig::load rejects unknown auth modes"),
     };
 
-    // Initialize App State & Dynamic File Watchers
+    // Initialize App State & Dynamic File Watchers. AMOEBA_SERVICES_FILE lets a
+    // native (non-container) run keep its catalog outside /etc/amoeba.
+    let services_file =
+        std::env::var("AMOEBA_SERVICES_FILE").unwrap_or_else(|_| DEFAULT_SERVICES_FILE.to_string());
     let app_state = AppState::new(
-        "/etc/amoeba/services.json",
+        &services_file,
         &config.auth.users_file,
         jwt_engine,
         Some(revocation_store),
