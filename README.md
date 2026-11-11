@@ -131,8 +131,8 @@ Amoeba is designed for environments where you want control without operational o
 | Streaming responses (SSE, Streamable HTTP for MCP) | Shipped |
 | App packages, web console deploys, source builds, `amoeba-mcp` | Shipped |
 | [Database service](#8-database-service) (PostgreSQL): approved queries, table CRUD, column masking, MCP tools | Shipped |
-| Pluggable secret backends (Vault, HTTP provider) | Planned (phase 3) |
-| External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned (phase 5) |
+| Pluggable secret backends (Vault, HTTP provider) | Planned |
+| External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned |
 
 **Current limits:** every service must be a container or compose stack that Amoeba starts; the hop from Amoeba to the service is plain `http://` on a private network; WebSocket upgrades are not proxied; request bodies are capped at 10 MB.
 
