@@ -114,6 +114,7 @@ export const App: React.FC = () => {
       />
 
       <ServiceTokenModal
+        key={selectedTokenService ?? 'none'}
         serviceName={selectedTokenService}
         onClose={() => setSelectedTokenService(null)}
       />

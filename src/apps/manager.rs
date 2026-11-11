@@ -675,6 +675,7 @@ fn build_service_config(
             .then(|| manifest.operation_rules.clone()),
         env_from_secret,
         header_from_secret,
+        local_upstream: manifest.local_upstream,
     }
 }
 
@@ -1210,6 +1211,8 @@ schema:
         assert_eq!(rules[0].operation, "loans.read");
         assert_eq!(rules[0].path.as_deref(), Some("tables/loans/**"));
 
+        assert!(!catalog.services["test-image"].local_upstream);
+
         // A rule the catalog loader would reject fails the install instead.
         let bad = format!(
             "{}operation_rules:\n  - operation: x\n    match_type: path\n    path: a/**/b\n",
@@ -1221,6 +1224,27 @@ schema:
                 .await
                 .is_err()
         );
+    }
+
+    // @lat: [[gateway#Local upstreams#From an app package]]
+    #[tokio::test]
+    async fn local_upstream_from_the_manifest_reaches_the_catalog() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let manifest = format!("{}local_upstream: true\n", image_manifest());
+        manager
+            .install(
+                &package_zip_with_manifest(&manifest),
+                InstallValues {
+                    secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let catalog = load_catalog(&catalog_path).unwrap();
+        assert!(catalog.services["test-image"].local_upstream);
     }
 
     // @lat: [[secrets#Gateway credential from a secret]]

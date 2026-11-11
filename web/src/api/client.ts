@@ -1,6 +1,7 @@
 import {
   AppsListResponse,
   AppStatusResponse,
+  IssuedToken,
   LoginResponse,
   ServiceItem,
   ServiceTokenResponse,
@@ -116,11 +117,29 @@ class AmoebaApiClient {
     });
   }
 
-  public async issueToken(name: string, role?: string, org?: string): Promise<ServiceTokenResponse> {
+  public async issueToken(
+    name: string,
+    options: { orgId?: string; ttlSeconds?: number; label?: string } = {},
+  ): Promise<ServiceTokenResponse> {
     return this.request<ServiceTokenResponse>(`/admin/apps/${encodeURIComponent(name)}/token`, {
       method: 'POST',
-      body: JSON.stringify({ role, org }),
+      body: JSON.stringify({
+        org_id: options.orgId || undefined,
+        ttl_seconds: options.ttlSeconds,
+        label: options.label || undefined,
+      }),
     });
+  }
+
+  public async listTokens(name: string): Promise<IssuedToken[]> {
+    return this.request<IssuedToken[]>(`/admin/apps/${encodeURIComponent(name)}/tokens`);
+  }
+
+  public async revokeToken(name: string, jti: string): Promise<void> {
+    await this.request<null>(
+      `/admin/apps/${encodeURIComponent(name)}/tokens/${encodeURIComponent(jti)}`,
+      { method: 'DELETE' },
+    );
   }
 
   public async testEndpoint(path: string, method: string = 'GET', body?: string): Promise<{ status: number; data: any; durationMs: number }> {

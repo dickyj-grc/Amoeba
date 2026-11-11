@@ -10,8 +10,8 @@ use amoeba::config::settings::{
 };
 use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::apps_admin::{
-    build_app_image, get_app_status, install_app, issue_service_token, list_apps, uninstall_app,
-    update_app_policy,
+    build_app_image, get_app_status, install_app, issue_service_token, list_apps,
+    list_service_tokens, revoke_service_token, uninstall_app, update_app_policy,
 };
 use amoeba::routing::auth::{login, revoke};
 use amoeba::routing::proxy::{proxy_handler, proxy_handler_root};
@@ -141,6 +141,14 @@ async fn main() {
         )
         .route("/apps/:name/build", post(build_app_image))
         .route("/apps/:name/token", post(issue_service_token))
+        .route(
+            "/apps/:name/tokens",
+            axum::routing::get(list_service_tokens),
+        )
+        .route(
+            "/apps/:name/tokens/:jti",
+            axum::routing::delete(revoke_service_token),
+        )
         .route_layer(middleware::from_fn(require_admin_role))
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),

@@ -6,6 +6,7 @@ use crate::apps::build::{BuildRequest, build_image, validate_image_name};
 use crate::apps::manager::{AppManager, AppManagerError, spawn_readiness_probe};
 use crate::apps::schema::{InstallValues, PolicyPatch};
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
+use crate::auth::issued::{IssuedToken, now_secs};
 use crate::routing::operation::scoped_role;
 use crate::state::AppState;
 use axum::{
@@ -171,9 +172,20 @@ pub async fn update_app_policy(
     }))
 }
 
+/// Default lifetime of a service token, kept short for one-off testing.
+const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
+const MIN_TOKEN_TTL: Duration = Duration::from_secs(60);
+/// AI clients keep the token in their config, so allow up to a year.
+const MAX_TOKEN_TTL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
+const MAX_TOKEN_LABEL_CHARS: usize = 100;
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ServiceTokenRequest {
     pub org_id: Option<String>,
+    /// Lifetime in seconds; 1 minute to 366 days. Defaults to 1 hour.
+    pub ttl_seconds: Option<u64>,
+    /// Where the token is used, e.g. "Cursor on laptop". Shown in the list.
+    pub label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -181,10 +193,42 @@ pub struct ServiceTokenResponse {
     pub token: String,
     pub org_id: Option<String>,
     pub role: String,
+    pub service: String,
+    pub jti: String,
+    pub label: String,
+    /// Unix seconds.
+    pub expires_at: u64,
+}
+
+/// Checks the requested lifetime and label before anything is signed.
+fn token_options(body: &ServiceTokenRequest) -> Result<(Duration, String), (StatusCode, String)> {
+    let ttl = body
+        .ttl_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_TOKEN_TTL);
+    if !(MIN_TOKEN_TTL..=MAX_TOKEN_TTL).contains(&ttl) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "ttl_seconds must be between {} and {}",
+                MIN_TOKEN_TTL.as_secs(),
+                MAX_TOKEN_TTL.as_secs()
+            ),
+        ));
+    }
+    let label = body.label.as_deref().unwrap_or("").trim().to_string();
+    if label.chars().count() > MAX_TOKEN_LABEL_CHARS || label.chars().any(char::is_control) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("label must be at most {MAX_TOKEN_LABEL_CHARS} printable characters"),
+        ));
+    }
+    Ok((ttl, label))
 }
 
 /// Mints a JWT whose only role is `mcp:<service>`. The service policy still
-/// has to grant that role; this does not widen access by itself.
+/// has to grant that role; this does not widen access by itself. The token is
+/// returned once; only its metadata is recorded, for listing and revoking.
 pub async fn issue_service_token(
     State(state): State<Arc<AppState>>,
     Path(app_name): Path<String>,
@@ -192,23 +236,70 @@ pub async fn issue_service_token(
 ) -> Result<Json<ServiceTokenResponse>, (StatusCode, String)> {
     let manager = app_manager(&state);
     let service = manager.get_service(&app_name).map_err(map_manager_error)?;
+    let (ttl, label) = token_options(&body)?;
     let org_id = token_org(&service, body.org_id)?;
     let role = scoped_role(&app_name);
-    let token = state
+    let (token, claims) = state
         .jwt_engine
-        .issue_token(
-            &role,
-            org_id.as_deref(),
-            &[role.clone()],
-            Duration::from_secs(60 * 60),
-        )
+        .issue_token_with_claims(&role, org_id.as_deref(), std::slice::from_ref(&role), ttl)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let expires_at = claims.exp as u64;
+    state
+        .issued_tokens
+        .record(IssuedToken {
+            jti: claims.jti.clone(),
+            service: app_name.clone(),
+            label: label.clone(),
+            org_id: org_id.clone(),
+            role: role.clone(),
+            issued_at: now_secs(),
+            expires_at,
+        })
+        .await;
 
     Ok(Json(ServiceTokenResponse {
         token,
         org_id,
         role,
+        service: app_name,
+        jti: claims.jti,
+        label,
+        expires_at,
     }))
+}
+
+/// Unexpired tokens issued for a service, metadata only.
+pub async fn list_service_tokens(
+    State(state): State<Arc<AppState>>,
+    Path(app_name): Path<String>,
+) -> Result<Json<Vec<IssuedToken>>, (StatusCode, String)> {
+    app_manager(&state)
+        .get_service(&app_name)
+        .map_err(map_manager_error)?;
+    Ok(Json(state.issued_tokens.list(&app_name).await))
+}
+
+/// Revokes one issued token by `jti`. The revocation is persisted, so the
+/// token stays rejected until it would have expired anyway.
+pub async fn revoke_service_token(
+    State(state): State<Arc<AppState>>,
+    Path((app_name, jti)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let Some(store) = &state.revocation_store else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "revocation is not configured".into(),
+        ));
+    };
+    if state.issued_tokens.remove(&app_name, &jti).await.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no token '{jti}' for service '{app_name}'"),
+        ));
+    }
+    store.revoke(jti).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn token_org(

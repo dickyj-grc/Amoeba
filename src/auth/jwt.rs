@@ -51,6 +51,19 @@ impl JwtEngine {
         roles: &[String],
         ttl: Duration,
     ) -> Result<String, String> {
+        self.issue_token_with_claims(sub, org_id, roles, ttl)
+            .map(|(token, _)| token)
+    }
+
+    /// Like [`Self::issue_token`], also returning the claims (`jti`, `exp`)
+    /// so the caller can record the token without decoding it.
+    pub fn issue_token_with_claims(
+        &self,
+        sub: &str,
+        org_id: Option<&str>,
+        roles: &[String],
+        ttl: Duration,
+    ) -> Result<(String, Claims), String> {
         let AuthMode::LocalJwt { secret } = &self.mode else {
             return Err("issue_token is only supported in local HMAC mode".to_string());
         };
@@ -70,12 +83,13 @@ impl JwtEngine {
             jti: uuid::Uuid::new_v4().to_string(),
         };
 
-        encode(
+        let token = encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(secret),
         )
-        .map_err(|e| format!("failed to issue token: {}", e))
+        .map_err(|e| format!("failed to issue token: {}", e))?;
+        Ok((token, claims))
     }
 }
 

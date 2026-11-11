@@ -33,3 +33,19 @@ Git runs with `GIT_TERMINAL_PROMPT=0` so a private repo fails instead of hanging
 The deploy form builds first for the Git and Dockerfile tabs, then installs the returned tag exactly like the Docker image tab.
 
 [[web/src/lib/deployPackage.ts#buildRequestFor]] maps the tab to a build request and [[web/src/lib/deployPackage.ts#requestBuild]] posts it. On failure the modal shows the error and the last 40 log lines. The button reads "Building image..." and then "Deploying...".
+
+## Service tokens
+
+The console's token dialog issues a scoped JWT (role `mcp:<service>`) for one service. The token is shown once; the user keeps it in their AI app's MCP settings, like an API key.
+
+[[web/src/lib/serviceToken.ts#mcpClientConfig]] builds an `mcpServers` entry pointing at `<console origin>/v1/<service>/<mcp path>` with the token as a bearer header. Copy falls back to a selected textarea where the Clipboard API is unavailable (plain-http consoles reached by IP).
+
+### Lifetime, list and revoke
+
+`POST /admin/apps/<name>/token` takes `ttl_seconds` (1 minute to 366 days, default 1 hour), a `label` and `org_id` ([[src/routing/apps_admin.rs#issue_service_token]]). The console defaults to 30 days because AI clients keep the token in their config.
+
+`GET /admin/apps/<name>/tokens` lists unexpired tokens for the service, metadata only. `DELETE /admin/apps/<name>/tokens/<jti>` adds the `jti` to the persisted revocation list, so the token is rejected from then on ([[src/routing/apps_admin.rs#revoke_service_token]]).
+
+### Registry
+
+[[src/auth/issued.rs#IssuedTokenStore]] records each issued token's `jti`, label, org, role and expiry in `issued_tokens.json` next to the catalog, never the token, so the file cannot be replayed. Expired entries are dropped on the next write.

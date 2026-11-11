@@ -14,7 +14,10 @@ use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Path, Request, State},
-    http::{HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION, header::HOST},
+    http::{
+        HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION, header::HOST,
+        header::ORIGIN,
+    },
     response::Response,
 };
 use futures_util::StreamExt;
@@ -99,6 +102,33 @@ fn is_gateway_identity_header(name: &HeaderName) -> bool {
         || lower == "x-amoeba-user"
         || lower == "x-amoeba-roles"
         || lower.starts_with("x-amoeba-secret-")
+}
+
+/// Copies the client's headers. Skips hop-by-hop headers, HOST (reqwest sets
+/// the upstream host), AUTHORIZATION (handled by upstream_auth injection) and
+/// gateway identity headers. SSE/MCP clients need Accept, Mcp-Session-Id,
+/// Last-Event-ID, etc. to reach the upstream. A `local_upstream` service is
+/// called as a local client: no ORIGIN, and `Host: localhost:<port>`.
+fn forward_client_headers(
+    mut outbound_req: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+    service_cfg: &ServiceConfig,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        if !is_hop_by_hop(name)
+            && name != HOST
+            && name != AUTHORIZATION
+            && !is_gateway_identity_header(name)
+            && !(service_cfg.local_upstream && name == ORIGIN)
+        {
+            outbound_req = outbound_req.header(name, value);
+        }
+    }
+    if service_cfg.local_upstream {
+        outbound_req =
+            outbound_req.header(HOST, format!("localhost:{}", service_cfg.placement.port));
+    }
+    outbound_req
 }
 
 fn apply_caller_identity(
@@ -399,19 +429,8 @@ pub async fn proxy_handler(
     let target_url = build_target_url(&host, service_cfg.placement.port, &subpath);
     let mut outbound_req = state.http_client.request(req.method().clone(), &target_url);
 
-    // 6.5. Forward client headers before consuming the body. Skip hop-by-hop
-    // headers, HOST (reqwest sets the upstream host), and AUTHORIZATION (handled
-    // by upstream_auth injection below). SSE/MCP clients need Accept,
-    // Mcp-Session-Id, Last-Event-ID, etc. to reach the upstream.
-    for (name, value) in req.headers() {
-        if !is_hop_by_hop(name)
-            && name != HOST
-            && name != AUTHORIZATION
-            && !is_gateway_identity_header(name)
-        {
-            outbound_req = outbound_req.header(name, value);
-        }
-    }
+    // 6.5. Forward client headers before consuming the body.
+    outbound_req = forward_client_headers(outbound_req, req.headers(), service_cfg);
 
     // The caller's org and user come from the verified token, never from
     // headers the client supplied (those were dropped above).
@@ -522,7 +541,39 @@ mod tests {
             public: false,
             env_from_secret: HashMap::new(),
             header_from_secret: HashMap::new(),
+            local_upstream: false,
         }
+    }
+
+    // @lat: [[gateway#Local upstreams]]
+    #[test]
+    fn local_upstream_drops_origin_and_sends_localhost_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_static("http://localhost:3064"));
+        headers.insert(HOST, HeaderValue::from_static("gateway.example"));
+        headers.insert("mcp-session-id", HeaderValue::from_static("s1"));
+        let client = reqwest::Client::new();
+
+        let mut cfg = base_service_cfg(None);
+        let built = forward_client_headers(client.post("http://10.0.0.5:8080/mcp"), &headers, &cfg)
+            .build()
+            .unwrap();
+        assert_eq!(
+            built.headers().get(ORIGIN).unwrap(),
+            "http://localhost:3064"
+        );
+        assert!(
+            built.headers().get(HOST).is_none(),
+            "reqwest sets Host itself"
+        );
+
+        cfg.local_upstream = true;
+        let built = forward_client_headers(client.post("http://10.0.0.5:8080/mcp"), &headers, &cfg)
+            .build()
+            .unwrap();
+        assert!(built.headers().get(ORIGIN).is_none());
+        assert_eq!(built.headers().get(HOST).unwrap(), "localhost:8080");
+        assert_eq!(built.headers().get("mcp-session-id").unwrap(), "s1");
     }
 
     // @lat: [[gateway#Caller identity]]

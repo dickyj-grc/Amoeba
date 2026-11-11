@@ -49,6 +49,11 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operation_rules: Vec<crate::config::schema::OperationRule>,
 
+    /// Call the app as a local client (no `Origin`, `Host: localhost:<port>`),
+    /// for apps that refuse browser or remote callers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_upstream: bool,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,

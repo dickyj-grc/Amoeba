@@ -39,6 +39,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [port, setPort] = useState(8080);
   const [cooldown, setCooldown] = useState(300);
   const [isPublic, setIsPublic] = useState(true);
+  const [localUpstream, setLocalUpstream] = useState(false);
   const [envPairs, setEnvPairs] = useState<EnvPair[]>([
     { key: 'PORT', value: '8080', isSecret: false },
   ]);
@@ -98,6 +99,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         port: Number(port),
         cooldownSeconds: Number(cooldown),
         isPublic,
+        localUpstream,
         envPairs,
       });
 
@@ -314,6 +316,24 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                 />
                 <span className="font-medium text-foreground">
                   Public API (No JWT Required)
+                </span>
+              </label>
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={localUpstream}
+                  onChange={(e) => setLocalUpstream(e.target.checked)}
+                  className="mt-0.5 rounded border-input text-primary focus:ring-ring h-4 w-4 bg-background"
+                />
+                <span>
+                  <span className="font-medium text-foreground">Call as a local client</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Drops the browser's Origin and sends Host: localhost. Turn on for apps that only
+                    accept local callers, such as MCP servers (Lightpanda: "Origin not allowed").
+                  </span>
                 </span>
               </label>
             </div>

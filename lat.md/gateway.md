@@ -33,6 +33,18 @@ The gateway forwards who is calling as headers derived from the verified token, 
 
 Upstream services such as the database service rely on `x-amoeba-roles` for column policy and tool filtering, so it must only ever come from the token.
 
+## Local upstreams
+
+A service with `local_upstream: true` is called as a local client: the browser's `Origin` is dropped and `Host` is `localhost:<port>`.
+
+Some upstreams refuse anything that looks like a browser or a remote name, for example Lightpanda's MCP server answers `403 Origin not allowed` to any request carrying `Origin`, as DNS-rebinding defense. Behind the gateway that check is moot, because the gateway is the public endpoint and authenticates the caller.
+
+[[src/routing/proxy.rs#forward_client_headers]] applies it. It is off by default because apps that answer CORS themselves need the browser's `Origin`.
+
+### From an app package
+
+`local_upstream: true` in `amoeba.yaml` is copied to the catalog service. The console's deploy form sets it with "Call as a local client".
+
 ## Upstream credentials
 
 `upstream_auth` injects a credential the caller never sees: `bearer_static` sets `Authorization: Bearer <token>`, `custom_header` sets `header_name: <token>`.
