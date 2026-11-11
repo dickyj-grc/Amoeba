@@ -4,7 +4,7 @@
 <td>
 
 # Amoeba
-**The self-hosted gateway between AI agents and your internal systems.** Amoeba decides who gets in, attaches the backend credential so the caller never holds it, and starts the service only when it is needed. It is one Rust binary, and it needs no Kubernetes.
+**The self-hosted gateway between AI and your systems.** Amoeba lets agents use your internal systems without ever holding their secrets, and lets you deploy apps that Claude, ChatGPT, or Gemini built the moment they are ready. It is one Rust binary, and it needs no Kubernetes.
 
 > **New:** [amoeba-mcp](docs/mcp-server.md) — an MCP server that lets AI agents (Claude, ChatGPT, Gemini) deploy and manage microservices on Amoeba.
 
@@ -15,7 +15,11 @@
 
 ## What Amoeba Does
 
-AI agents and AI-built services are quick to create and hard to let near real systems. Each one needs an answer to "who may call this, with which key, and what does it cost to keep running?" before a security team will approve it.
+Amoeba does two jobs, and both go through the same gateway.
+
+### Job 1: Expose internal systems to agents, without exposing their secrets
+
+AI agents are quick to create and hard to let near real systems. Each one needs an answer to "who may call this, with which key, and what does it cost to keep running?" before a security team will approve it.
 
 Amoeba sits in front of every service at `/v1/<service>/...` and answers three questions on each request:
 
@@ -35,10 +39,25 @@ agent ──(personal JWT)──►  Amoeba  ──(backend's own key)──► 
                              └─ log who called what
 ```
 
+For databases, the [database service](#8-database-service) goes one step further: agents run only approved queries and table operations, and see only the columns their roles allow.
+
+### Job 2: Deploy apps that AI built, straight away
+
+Ask Claude, ChatGPT, or Gemini to build a small app, and it can be running on Amoeba a few minutes later, as a Docker container, behind a login, at its own path.
+
+- **From the AI itself:** with [amoeba-mcp](docs/mcp-server.md) connected, the assistant that wrote the app deploys it with one tool call (`deploy_service`), from a Dockerfile, a source tarball, or an image. It can then read the build and runtime logs and fix what broke.
+- **From the web console:** paste a Dockerfile, point at a Git repo, or enter an image. Amoeba builds the image on its own host and deploys it.
+- **No platform work per app:** no DNS record, TLS certificate, reverse-proxy rule, or port to pick. The app is reachable at `/v1/<app>/`, sleeps when idle, and gets its secrets from Amoeba instead of from its code.
+
+### Why they belong together
+
+An AI-built app is usually built to do something with your systems: read a report, update a ticket, query a database. On Amoeba it sits behind the same access control as everything else, and it calls your internal systems through the gateway, so the app never needs their passwords either. Only people and agents with the right roles can use it.
+
 ## Who It Is For
 
 - **Teams running MCP tool servers** that need per-tool access control and do not want every server running all day.
-- **Teams letting Claude, ChatGPT, or Gemini build small services**, who need a safe place to deploy them. Agents deploy through [amoeba-mcp](docs/mcp-server.md); people deploy through the web console from an image, a Git repo, or a Dockerfile.
+- **Teams letting Claude, ChatGPT, or Gemini build small apps** who need somewhere safe to run them the same day (job 2).
+- **Security and data teams** asked to give agents access to internal systems and databases without handing out credentials (job 1).
 - **Anyone putting an open-source tool behind a login** when the tool ships with no authentication of its own.
 - **Home labs and small VMs** that want many services on one machine without paying for idle containers.
 
@@ -116,6 +135,20 @@ Amoeba is designed for environments where you want control without operational o
 | External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned |
 
 **Current limits:** every service must be a container or compose stack that Amoeba starts; the hop from Amoeba to the service is plain `http://` on a private network; WebSocket upgrades are not proxied; request bodies are capped at 10 MB.
+
+### Roadmap
+
+The goal: AI agents and AI-built apps can use any internal system or external API through Amoeba, and no code they write or run ever holds a production credential.
+
+| Phase | What it delivers | State |
+|---|---|---|
+| **1. Gateway foundations** | Requests fail closed when a backend credential is missing; path-based operation rules (`loans.create`); verified roles forwarded as `x-amoeba-roles` | Done |
+| **2. Database service** | Approved queries and table CRUD over PostgreSQL; show/mask/hide columns per role; read-only reads, row caps with rollback, org scoping, audit; MCP tools filtered by role ([section 8](#8-database-service)) | Done, except idempotency keys on creates |
+| **3. Secret providers** | Pluggable secret sources behind one interface: files (today), environment, HashiCorp Vault, and an HTTP provider that fetches by reference with a short cache and fails closed | Planned |
+| **4. AptiWise integration** | AptiWise as the control plane: serves secrets to Amoeba under a scoped identity, maps identity-provider groups to Amoeba roles, and runs query approval (table allowlist, read-only check, limits, a column-by-role approval screen) | Planned |
+| **5. Egress: external upstreams** | A service that is just an HTTPS URL (Stripe, a CRM, another server), with no container. Amoeba checks the caller, injects the real API key, and logs the call, so AI-built apps can use any API without holding its key | Planned |
+
+Open decisions: other databases (SQL Server, Oracle) need their own work in phase 2, and whether the HTTP provider or Vault comes first in phase 3 depends on where AptiWise runs for clients (hosted, or on their servers).
 
 ---
 
