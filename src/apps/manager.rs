@@ -288,7 +288,7 @@ fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), AppManagerError> {
             None => continue,
         };
 
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             fs::create_dir_all(&outpath)?;
         } else {
             if let Some(parent) = outpath.parent() {
