@@ -671,7 +671,8 @@ fn build_service_config(
             token_secret: Some(format!("{}/{}", manifest.service_name(), auth.secret)),
         }),
         public: manifest.public,
-        operation_rules: None,
+        operation_rules: (!manifest.operation_rules.is_empty())
+            .then(|| manifest.operation_rules.clone()),
         env_from_secret,
         header_from_secret,
     }
@@ -1181,6 +1182,47 @@ schema:
         assert!(matches!(result, Err(AppManagerError::Validation(_))));
     }
 
+    // @lat: [[gateway#Operation resolution#From an app package]]
+    #[tokio::test]
+    async fn operation_rules_from_the_manifest_reach_the_catalog() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let values = || InstallValues {
+            secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+            ..Default::default()
+        };
+
+        let manifest = format!(
+            "{}operation_rules:\n  - operation: loans.read\n    match_type: path\n    path: tables/loans/**\n    values: [GET]\n",
+            image_manifest()
+        );
+        manager
+            .install(&package_zip_with_manifest(&manifest), values())
+            .await
+            .unwrap();
+        let catalog = load_catalog(&catalog_path).unwrap();
+        let rules = catalog.services["test-image"]
+            .operation_rules
+            .clone()
+            .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].operation, "loans.read");
+        assert_eq!(rules[0].path.as_deref(), Some("tables/loans/**"));
+
+        // A rule the catalog loader would reject fails the install instead.
+        let bad = format!(
+            "{}operation_rules:\n  - operation: x\n    match_type: path\n    path: a/**/b\n",
+            image_manifest()
+        );
+        assert!(
+            manager
+                .install(&package_zip_with_manifest(&bad), values())
+                .await
+                .is_err()
+        );
+    }
+
     // @lat: [[secrets#Gateway credential from a secret]]
     #[tokio::test]
     async fn upstream_auth_points_at_the_declared_secret() {
@@ -1277,6 +1319,52 @@ schema:
         assert_eq!(
             auth.token_secret.as_deref(),
             Some("obscura/OBSCURA_MCP_TOKEN")
+        );
+    }
+
+    // @lat: [[database#Gateway setup]]
+    #[tokio::test]
+    async fn finance_db_example_package_installs_with_its_rules_and_definitions() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/app-packages/finance-db");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let values = InstallValues {
+            secrets: HashMap::from([(
+                "DATABASE_URL".to_string(),
+                "postgres://reader:pw@db:5432/finance".to_string(),
+            )]),
+            ..Default::default()
+        };
+        manager
+            .install(
+                &package_zip_with_manifest(&fs::read_to_string(dir.join("amoeba.yaml")).unwrap()),
+                values,
+            )
+            .await
+            .unwrap();
+
+        let svc = &load_catalog(&catalog_path).unwrap().services["finance-db"];
+        assert_eq!(
+            svc.env_from_secret["DATABASE_URL"],
+            "finance-db/DATABASE_URL"
+        );
+        let rules = svc.operation_rules.as_ref().unwrap();
+        assert!(rules.iter().any(|r| r.operation == "reports.run"));
+        assert_eq!(
+            svc.permissions["customers.read"],
+            vec!["cs_agent", "compliance"]
+        );
+
+        // The definitions the package ships must be the ones in definitions.json.
+        let env = &svc.container.as_ref().unwrap().env;
+        let shipped: serde_json::Value = serde_json::from_str(&env["DB_DEFINITIONS"]).unwrap();
+        let file: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("definitions.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            shipped, file,
+            "amoeba.yaml's DB_DEFINITIONS default is out of date"
         );
     }
 

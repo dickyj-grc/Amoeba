@@ -1,0 +1,47 @@
+api_version: v1
+name: finance-db
+version: 0.1.0
+description: Approved queries and table access to a PostgreSQL database, with per-role column masking.
+app:
+  type: image
+  image: ghcr.io/dickyj-grc/amoeba-db:latest
+placement:
+  port: 8080
+  cooldown_seconds: 300
+# Each table and query gets its own operation name, so permissions can grant
+# them separately. First match wins; anything unmatched is denied because no
+# role is granted the fallback read/add/update/delete operations.
+operation_rules:
+  - operation: customers.read
+    match_type: path
+    path: tables/customers/**
+    values: [GET]
+  - operation: customers.write
+    match_type: path
+    path: tables/customers/**
+    values: [POST, PATCH, DELETE]
+  - operation: reports.run
+    match_type: path
+    path: queries/**
+    values: [POST]
+  # MCP tools/call is checked again inside the service, per tool and role.
+  - operation: mcp
+    match_type: path
+    path: mcp
+    values: [POST]
+permissions:
+  customers.read: [cs_agent, compliance]
+  customers.write: [compliance]
+  reports.run: [analyst, compliance]
+  mcp: [analyst, cs_agent, compliance]
+schema:
+  env:
+    DB_DEFINITIONS:
+      description: Approved tables and queries (JSON). See definitions.json in this package.
+      default: |-
+        {"schema": "public", "statement_timeout_ms": 5000, "tables": {"customers": {"description": "Bank customers of the caller's organization.", "key": "id", "org_column": "org_id", "operations": {"select": ["cs_agent", "compliance"], "update": ["compliance"]}, "columns": {"id": {"default": "show"}, "name": {"default": "show"}, "nik": {"mask": ["cs_agent"], "show": ["compliance"]}, "balance": {"show": ["compliance"]}}}}, "queries": {"overdue-loans": {"description": "Overdue loans at one branch.", "mode": "read", "sql": "SELECT l.id, l.branch, c.name AS customer, c.nik, l.amount, l.due_date FROM loans l JOIN customers c ON c.id = l.customer_id WHERE l.status = 'overdue' AND l.branch = $1 AND c.org_id = current_setting('app.org') ORDER BY l.due_date", "params": [{"name": "branch", "type": "text", "description": "Branch code, e.g. JKT-01"}], "row_limit": 500, "roles": ["analyst", "compliance"], "columns": {"id": {"default": "show"}, "branch": {"default": "show"}, "customer": {"default": "show"}, "nik": {"mask": ["analyst"], "show": ["compliance"]}, "amount": {"default": "show"}, "due_date": {"default": "show"}}}}}
+  secrets:
+    DATABASE_URL:
+      description: PostgreSQL connection string. Only this service receives it.
+      required: true
+      validation_pattern: "^postgres(ql)?://"

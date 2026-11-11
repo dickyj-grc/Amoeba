@@ -44,6 +44,11 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_auth: Option<AppUpstreamAuth>,
 
+    /// Named operations for `permissions`, matched by path or HTTP method.
+    /// Same shape and validation as a catalog service's `operation_rules`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operation_rules: Vec<crate::config::schema::OperationRule>,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,

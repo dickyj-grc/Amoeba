@@ -51,3 +51,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Compute database service image tags
+        id: meta-db
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}-db
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push database service
+        uses: docker/build-push-action@v6
+        with:
+          context: services/amoeba-db
+          push: true
+          tags: ${{ steps.meta-db.outputs.tags }}
+          labels: ${{ steps.meta-db.outputs.labels }}
+          cache-from: type=gha,scope=amoeba-db
+          cache-to: type=gha,mode=max,scope=amoeba-db

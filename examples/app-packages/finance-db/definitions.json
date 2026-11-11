@@ -1,0 +1,39 @@
+{
+  "schema": "public",
+  "statement_timeout_ms": 5000,
+  "tables": {
+    "customers": {
+      "description": "Bank customers of the caller's organization.",
+      "key": "id",
+      "org_column": "org_id",
+      "operations": {
+        "select": ["cs_agent", "compliance"],
+        "update": ["compliance"]
+      },
+      "columns": {
+        "id": { "default": "show" },
+        "name": { "default": "show" },
+        "nik": { "mask": ["cs_agent"], "show": ["compliance"] },
+        "balance": { "show": ["compliance"] }
+      }
+    }
+  },
+  "queries": {
+    "overdue-loans": {
+      "description": "Overdue loans at one branch.",
+      "mode": "read",
+      "sql": "SELECT l.id, l.branch, c.name AS customer, c.nik, l.amount, l.due_date FROM loans l JOIN customers c ON c.id = l.customer_id WHERE l.status = 'overdue' AND l.branch = $1 AND c.org_id = current_setting('app.org') ORDER BY l.due_date",
+      "params": [{ "name": "branch", "type": "text", "description": "Branch code, e.g. JKT-01" }],
+      "row_limit": 500,
+      "roles": ["analyst", "compliance"],
+      "columns": {
+        "id": { "default": "show" },
+        "branch": { "default": "show" },
+        "customer": { "default": "show" },
+        "nik": { "mask": ["analyst"], "show": ["compliance"] },
+        "amount": { "default": "show" },
+        "due_date": { "default": "show" }
+      }
+    }
+  }
+}

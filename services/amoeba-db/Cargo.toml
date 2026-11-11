@@ -1,0 +1,25 @@
+[package]
+name = "amoeba-db"
+version = "0.1.0"
+edition = "2024"
+description = "Database service for Amoeba: approved queries and table access with per-role column policy (PostgreSQL)"
+license = "MIT"
+repository = "https://github.com/dickyj-grc/Amoeba"
+
+[[bin]]
+name = "amoeba-db"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "signal", "time", "fs"] }
+tokio-postgres = "0.7"
+deadpool-postgres = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

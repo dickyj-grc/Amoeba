@@ -20,3 +20,31 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  amoeba-db:
+
+    runs-on: ubuntu-latest
+
+    # The database service's integration tests run against a real Postgres.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports: [ "5432:5432" ]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+
+    defaults:
+      run:
+        working-directory: services/amoeba-db
+
+    env:
+      AMOEBA_DB_TEST_URL: postgres://postgres:test@localhost:5432/postgres
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
