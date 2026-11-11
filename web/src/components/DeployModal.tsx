@@ -9,7 +9,14 @@ import {
   Trash,
   X,
 } from 'lucide-react';
-import { buildDeployForm, type EnvPair } from '../lib/deployPackage';
+import {
+  BuildError,
+  buildDeployForm,
+  buildRequestFor,
+  requestBuild,
+  validateServiceName,
+  type EnvPair,
+} from '../lib/deployPackage';
 
 interface DeployModalProps {
   isOpen: boolean;
@@ -35,8 +42,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [envPairs, setEnvPairs] = useState<EnvPair[]>([
     { key: 'PORT', value: '8080', isSecret: false },
   ]);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [contextUrl, setContextUrl] = useState('');
+  const [phase, setPhase] = useState<'building' | 'deploying' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [buildLog, setBuildLog] = useState<string[]>([]);
+  const isSubmitting = phase !== null;
 
   if (!isOpen) return null;
 
@@ -56,25 +66,40 @@ export const DeployModal: React.FC<DeployModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) {
-      setError('Service name is required');
+    const nameError = validateServiceName(name.trim());
+    if (nameError) {
+      setError(nameError);
       return;
     }
 
-    setIsSubmitting(true);
     setError(null);
+    setBuildLog([]);
 
     try {
+      const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
+
+      // Git and Dockerfile sources are built into an image on the Amoeba host first.
+      let image = dockerImage.trim();
+      const build = buildRequestFor(activeTab, {
+        gitUrl,
+        dockerfile: dockerfileContent,
+        contextUrl,
+      });
+      if (build) {
+        setPhase('building');
+        image = await requestBuild(name.trim(), build, token);
+      }
+
+      setPhase('deploying');
       const formData = buildDeployForm({
         name: name.trim(),
-        image: activeTab === 'image' ? dockerImage.trim() : `amoeba/${name.trim()}:latest`,
+        image,
         description: `Deployed via Amoeba Web UI (${activeTab})`,
         port: Number(port),
         cooldownSeconds: Number(cooldown),
         isPublic,
         envPairs,
       });
-      const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
 
       const res = await fetch('/admin/apps', {
         method: 'POST',
@@ -93,8 +118,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
       onClose();
     } catch (err: any) {
       setError(err.message || 'Deployment error');
+      if (err instanceof BuildError) {
+        setBuildLog(err.log);
+      }
     } finally {
-      setIsSubmitting(false);
+      setPhase(null);
     }
   };
 
@@ -164,6 +192,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         {error && (
           <div className="mb-4 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-xs text-destructive-foreground">
             {error}
+            {buildLog.length > 0 && (
+              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-background/60 p-2 font-mono text-[10px] text-muted-foreground">
+                {buildLog.slice(-40).join('\n')}
+              </pre>
+            )}
           </div>
         )}
 
@@ -241,6 +274,19 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                 className="w-full rounded-md border border-input bg-background p-2.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                 required
               />
+              <label className="block font-medium text-foreground mt-3 mb-1">
+                Build context repo (optional)
+              </label>
+              <input
+                type="url"
+                value={contextUrl}
+                onChange={(e) => setContextUrl(e.target.value)}
+                placeholder="https://github.com/username/fastapi-service.git"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Cloned as the build context so COPY has files to copy. Without it the Dockerfile builds on its own.
+              </p>
             </div>
           )}
 
@@ -342,7 +388,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
               className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-50"
             >
               <Rocket className="h-3.5 w-3.5" />
-              <span>{isSubmitting ? 'Deploying...' : 'Deploy to Amoeba'}</span>
+              <span>{phase === 'building'
+                  ? 'Building image...'
+                  : phase === 'deploying'
+                    ? 'Deploying...'
+                    : 'Deploy to Amoeba'}</span>
             </button>
           </div>
         </form>
