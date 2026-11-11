@@ -4,7 +4,7 @@
 <td>
 
 # Amoeba
-The Amoeba Compute Orchestrator is an edge-aware, scale-to-zero L7 application and compute gateway written in Rust (Axum). It manages the lifecycle of transient microservices (AI models, web scrapers, document parsers) and stateful application nodes, enforcing zero-trust authorization, usage metering, and capacity gating.
+**The self-hosted gateway between AI agents and your internal systems.** Amoeba decides who gets in, attaches the backend credential so the caller never holds it, and starts the service only when it is needed. It is one Rust binary, and it needs no Kubernetes.
 
 > **New:** [amoeba-mcp](docs/mcp-server.md) — an MCP server that lets AI agents (Claude, ChatGPT, Gemini) deploy and manage microservices on Amoeba.
 
@@ -13,33 +13,61 @@ The Amoeba Compute Orchestrator is an edge-aware, scale-to-zero L7 application a
 </table>
 
 
-## System Architecture & Technical Specification
+## What Amoeba Does
 
-The **Amoeba Compute Orchestrator (`amoeba`)** is an edge-aware, scale-to-zero L7 application and compute gateway written in Rust (Axum). It manages the lifecycle of transient microservices (AI models, web scrapers, document parsers) and stateful application nodes, enforcing zero-trust authorization, usage metering, and capacity gating.
+AI agents and AI-built services are quick to create and hard to let near real systems. Each one needs an answer to "who may call this, with which key, and what does it cost to keep running?" before a security team will approve it.
+
+Amoeba sits in front of every service at `/v1/<service>/...` and answers three questions on each request:
+
+| Question | How Amoeba answers it |
+|---|---|
+| **Who is calling, and may they?** | Verifies the caller's JWT (issued locally, or by your identity provider through JWKS), names the operation from the HTTP method and path, and checks the caller's roles for that operation, per organization if needed. A denied request never wakes the service. |
+| **With what credential?** | Strips the caller's token and attaches the backend's own key. Callers hold only a personal token that can be revoked; they never see the backend credential. |
+| **Is the service awake?** | Cold-boots the container on the first request, keeps it up while connections (including long streams) are live, and stops it after a cooldown. |
+
+Every request is logged with the caller, organization, service, operation, status, and latency.
+
+```
+agent ──(personal JWT)──►  Amoeba  ──(backend's own key)──►  service
+                             │
+                             ├─ verify token, resolve operation, check roles
+                             ├─ start the container if it is asleep
+                             └─ log who called what
+```
+
+## Who It Is For
+
+- **Teams running MCP tool servers** that need per-tool access control and do not want every server running all day.
+- **Teams letting Claude, ChatGPT, or Gemini build small services**, who need a safe place to deploy them. Agents deploy through [amoeba-mcp](docs/mcp-server.md); people deploy through the web console from an image, a Git repo, or a Dockerfile.
+- **Anyone putting an open-source tool behind a login** when the tool ships with no authentication of its own.
+- **Home labs and small VMs** that want many services on one machine without paying for idle containers.
 
 ---
 
 ## Why Amoeba?
 
-### 1. Cut Energy and Infrastructure Costs
+### 1. Access Control for Agents and Services
+Amoeba enforces JWT-based access control in front of any HTTP service without modifying the service.
+
+- Every service gets role-based permissions. Operations default to `read`, `add`, `update`, and `delete` by HTTP method, and path rules let you name finer ones such as `loans.create` (see [section 4](#4-operation-mapping--role-security)).
+- Permissions can differ per organization, so one service can serve several tenants with separate role maps.
+- Local HMAC mode bootstraps users from a simple JSON file. JWKS mode plugs into a corporate identity provider, so agents and people use the logins you already manage.
+- The verified user, organization, and roles are forwarded to the service as `x-amoeba-user`, `x-amoeba-org`, and `x-amoeba-roles`. Copies sent by the client are stripped.
+
+### 2. Backend Credentials Stay at the Gateway
+Amoeba keeps sensitive material out of callers' hands, compose files, and config.
+
+- `upstream_auth` replaces the caller's JWT with a backend-specific static token or custom header before forwarding.
+- `env_from_secret` injects secrets from a protected directory at container-start time. `header_from_secret` keeps a secret on the gateway and sends it to the service per request.
+- A configured credential that cannot be produced fails closed with `503`, so a request is never forwarded with an empty key.
+- App packages can carry secrets encrypted with [age](#73-encrypted-secrets-with-age).
+
+### 3. Cut Energy and Infrastructure Costs
 Amoeba's scale-to-zero lifecycle means workloads are only running when they are actually being used.
 
 - **Local machines**: a home lab or workstation no longer has to keep every container — GPU models, scrapers, databases, dashboards — idling 24/7. Services cold-boot on demand and stop after a configurable cooldown, directly reducing power draw and fan noise.
 - **Cloud VMs**: because containers are started only when requested, a single VM can host far more services than it could if everything were always-on. You pay for compute only when it is being used, and you can pack more workloads onto smaller instances.
-
-### 2. Add Zero-Trust Auth to Any Open Source Project
-Many excellent open-source tools ship with no authentication layer. Amoeba sits in front of them and enforces JWT-based access control without modifying the upstream application.
-
-- Every service gets role-based permissions (`read`, `add`, `update`, `delete`) out of the box.
-- Local HMAC mode lets you bootstrap users from a simple JSON file.
-- JWKS mode lets you plug in a corporate identity provider for multi-tenant deployments.
-
-### 3. Deploy New Apps Without Subdomain or SSL Plumbing
-Adding a containerized app usually means DNS records, reverse-proxy rules, TLS certificates, and port management. Amoeba removes that toil:
-
-- New services are reached via `/v1/<service_name>/<subpath>`; no custom subdomain is required.
-- The edge proxy (Caddy, Traefik, etc.) handles SSL termination once for the whole gateway.
-- Adding or removing an app is a single entry in `services.json`; Amoeba hot-reloads it without a restart.
+- Scale-to-zero is optional per service. An always-on, stateful app can sit behind Amoeba for access control and credential injection alone.
 
 ### 4. Protect Machine Resources With Declared Capacity Budgets
 Instead of guessing whether a machine can handle another workload, Amoeba enforces declared CPU, memory, and GPU-VRAM budgets before admitting a request that would cold-start a service.
@@ -52,20 +80,42 @@ Instead of guessing whether a machine can handle another workload, Amoeba enforc
 Every proxied request emits a telemetry log containing the caller, organization, service, operation, status code, and latency.
 
 - No extra observability tooling is required to answer "who called what and when."
+- A backend that only knows one shared service account still gets a per-person and per-agent trail at the gateway.
 - The same logs form the basis for chargeback, debugging, and security auditing.
 
-### 6. Secure Secrets and Upstream Credential Translation
-Amoeba keeps sensitive material out of your compose files and config while bridging different auth schemes between callers and backends.
+### 6. Deploy New Apps Without Subdomain or SSL Plumbing
+Adding a containerized app usually means DNS records, reverse-proxy rules, TLS certificates, and port management. Amoeba removes that toil:
 
-- `env_from_secret` injects secrets from a protected directory at container-start time.
-- `upstream_auth` can replace the caller's JWT with a backend-specific static token or custom header before forwarding the request.
+- New services are reached via `/v1/<service_name>/<subpath>`; no custom subdomain is required.
+- The edge proxy (Caddy, Traefik, etc.) handles SSL termination once for the whole gateway.
+- Adding or removing an app is a single entry in `services.json`; Amoeba hot-reloads it without a restart.
+- The web console and the MCP server can build an image from a Git repo or a Dockerfile and deploy it in one step.
 
 ### 7. Minimal, Self-Hosted, and Portable
-Amoeba is designed for environments where you want control without operational overhead.
+Amoeba is designed for environments where you want control without operational overhead, including ones where data may not leave your own servers.
 
 - The release image is a small static binary; no Kubernetes or managed control plane is required.
 - Works with Docker on Linux/Windows and Apple's native `container` CLI on macOS/Apple Silicon.
 - Each machine runs its own instance with its own config, so scaling out is as simple as adding another box.
+
+---
+
+## Status
+
+| Area | State |
+|---|---|
+| JWT auth (local HMAC and JWKS), roles, per-organization permissions | Shipped |
+| Operation rules by HTTP method and by path | Shipped |
+| Verified identity headers (`x-amoeba-user`, `x-amoeba-org`, `x-amoeba-roles`) | Shipped |
+| Upstream credential injection, fail-closed | Shipped |
+| Scale-to-zero for single containers and compose stacks, capacity budgets | Shipped |
+| Streaming responses (SSE, Streamable HTTP for MCP) | Shipped |
+| App packages, web console deploys, source builds, `amoeba-mcp` | Shipped |
+| [Database service](#8-database-service-planned): approved queries, table CRUD, column masking | Planned, in design |
+| Pluggable secret backends (Vault, HTTP provider) | Planned |
+| External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned |
+
+**Current limits:** every service must be a container or compose stack that Amoeba starts; the hop from Amoeba to the service is plain `http://` on a private network; WebSocket upgrades are not proxied; request bodies are capped at 10 MB.
 
 ---
 
@@ -463,10 +513,10 @@ pub async fn unified_auth_middleware(
 Requests are evaluated prior to waking or scaling containers.
 
 ```
-Incoming Request Method / Body
+Incoming Request Method / Path
               │
               ▼
-    Resolve Operation Type ──► [ "read" | "add" | "update" | "delete" | "custom" ]
+    Resolve Operation Name ──► [ "read" | "add" | "update" | "delete" | a named rule ]
               │
               ▼
     Compare `claims.roles` against `service.permissions[operation]`
@@ -481,8 +531,12 @@ Proceed to Proxy    403 Forbidden (Container remains offline)
 ```
 
 1. **REST Defaults:** Maps `GET` $\rightarrow$ `read`, `POST` $\rightarrow$ `add`, `PUT`/`PATCH` $\rightarrow$ `update`, `DELETE` $\rightarrow$ `delete`.
-2. **Payload Overrides (Odoo / JSON-RPC):** Scans body for `params.method` (e.g., `search_read` is classified as `read` despite using `POST`).
-3. **Upstream Token Injection:** If `upstream_auth` is set in `services.json`, the proxy strips the incoming caller token and attaches the microservice-specific static key or minted internal token before dispatching the request over internal loopback networks.
+2. **Named Operations (`operation_rules`):** A service can name its own operations. Rules are checked in order and the first match wins; with no match, the REST defaults apply.
+   - `http_method` rules match on the method: `{ "operation": "execute", "match_type": "http_method", "values": ["POST"] }`.
+   - `path` rules match on the subpath after `/v1/<service>/`, optionally narrowed by method: `{ "operation": "loans.create", "match_type": "path", "path": "tables/loans", "values": ["POST"] }`. In a pattern, `{name}` and `*` match exactly one segment, and a final `**` matches any remaining segments.
+   - The operation name is the key looked up in `permissions`, so `"loans.create": ["loan_officer"]` grants that one call to that one role. Rules are validated when the catalog loads, so a malformed rule fails the reload instead of silently never matching.
+3. **Upstream Token Injection:** If `upstream_auth` is set in `services.json`, the proxy strips the incoming caller token and attaches the service-specific static key or custom header before dispatching the request over internal loopback networks. If the configured credential cannot be produced, the request is rejected with `503` and `x-amoeba-rejection-reason: secret-unavailable`.
+4. **Caller Identity Headers:** The proxy forwards `x-amoeba-user`, `x-amoeba-org`, and `x-amoeba-roles` taken from the verified token, and drops any copies the client sent, so a service can trust them for its own decisions (for example, per-role column masking).
 
 ---
 
@@ -836,11 +890,142 @@ The proxy also supports **streaming responses** (SSE, MCP Streamable HTTP, and a
 
 ---
 
-## 8. Nightly End-to-End Test on DigitalOcean
+## 8. Database Service (planned)
+
+> **Status: in design, not yet shipped.** This section describes the intended behaviour so it can be reviewed early. The config shapes below are proposals and may change. The gateway features it depends on (path-based operation rules and the `x-amoeba-roles` header) are already shipped.
+
+The database is the system agents most often need and the one a security team is least willing to open. The usual choices are to hand a service the database password, or to write and review a new API for every question someone wants to ask.
+
+The database service is a third option: one generic, reviewed service holds the connection, and everything callers can do is an **approved definition** — a named query or a table opened for specific operations. No caller ever sends SQL, and no other service ever holds the password.
+
+### 8.1 How it works
+
+```
+agent ──► Amoeba ──► database service ──► your database
+           │              │
+           │              ├─ runs only approved definitions, with bound parameters
+           │              ├─ applies the column policy for the caller's roles
+           │              └─ scopes rows to the caller's organization
+           └─ checks the caller's roles for this table or query
+```
+
+- **Definitions are data, not code.** Adding a query is a config change that the service hot-loads. The service binary is reviewed once; each definition is a few lines that a data owner can approve.
+- **One service per database credential, not per query.** A thousand queries against one database run in one service with one connection pool. Separate databases get separate services, so a fault in one cannot reach another's connection.
+- **It scales to zero** like any other Amoeba service: it wakes on the first call and stops when idle.
+- **It is an installable app package**, not part of the gateway binary, so the gateway stays small.
+
+### 8.2 Routes
+
+```
+GET    /v1/<db>/tables/loans?status=overdue    select
+GET    /v1/<db>/tables/loans/42                select one
+POST   /v1/<db>/tables/loans                   create   (JSON body)
+PATCH  /v1/<db>/tables/loans/42                update   (JSON body)
+DELETE /v1/<db>/tables/loans/42                delete
+
+POST   /v1/<db>/queries/overdue-loans          run a named query (JSON parameters)
+```
+
+For plain table access nobody writes SQL: you open a table for the operations you want and the service generates the definitions from the table's columns. Named queries cover reports and joins.
+
+Each approved definition is also listed as an MCP tool, filtered by the caller's roles, so an agent sees only the tools it may use.
+
+### 8.3 A named query
+
+```json
+{
+  "name": "overdue-loans",
+  "mode": "read",
+  "sql": "SELECT id, customer_id, amount, due_date FROM loans WHERE status = 'overdue' AND branch = $1",
+  "params": [{ "name": "branch", "type": "text" }],
+  "row_limit": 500
+}
+```
+
+```bash
+curl -X POST https://gateway.example.com/v1/finance-db/queries/overdue-loans \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"branch": "JKT-01"}'
+```
+
+The caller supplies a query name and values. The SQL text comes only from the approved definition, and values are always bound parameters, never pasted into the SQL.
+
+### 8.4 Guardrails
+
+| Guardrail | What it prevents |
+|---|---|
+| Callers send a name and values, never SQL | SQL injection |
+| Read definitions run in a read-only transaction, on a read-only database account | A "read" that writes |
+| Writes use a separate account with rights only on tables opened for writing | Writes outside the approved tables |
+| Row limit on every definition; a write that touches more rows than its limit is rolled back | Bulk reads, and an update meant for one row that matches thousands |
+| Statement timeout | A query that ties up the database |
+| The caller's organization comes from the verified token and is set for row-level security | One tenant reading or writing another tenant's rows |
+| Tables and columns are closed until explicitly opened | A new column becoming visible by accident |
+| One audit record per call: user, definition, parameters, rows affected | Untraceable access |
+
+### 8.5 Column policy: show, mask, or hide per role
+
+Access to an endpoint and access to a column are separate decisions. The gateway decides whether a caller may use `tables/customers` at all; the database service decides which columns that caller gets back.
+
+```json
+{
+  "table": "customers",
+  "columns": {
+    "id":      { "default": "show" },
+    "name":    { "default": "show" },
+    "nik":     { "default": "hide", "mask": ["cs_agent"], "show": ["compliance"] },
+    "balance": { "default": "hide", "show": ["finance", "compliance"] }
+  }
+}
+```
+
+With this policy, a `cs_agent` calling `GET /v1/crm-db/tables/customers/42` gets `id`, `name`, and a masked `nik`. A `compliance` caller using the same URL gets every column. Masking is applied in the SQL the service generates, so a value the caller is not entitled to never leaves the database.
+
+- The default is `hide`.
+- When a caller has several roles, the most permissive one applies.
+- The policy applies to writes too: an update that names a column the caller cannot see is rejected.
+
+### 8.6 What the gateway already provides
+
+The access rules for the database service use features that are shipped today. Path rules give each table and query its own operation name, and `permissions` maps those names to roles:
+
+```json
+"finance-db": {
+  "placement": { "type": "vm", "ip": "finance-db", "port": 8080, "cooldown_seconds": 300 },
+  "container": { "image": "<database-service-image>" },
+  "operation_rules": [
+    { "operation": "loans.create", "match_type": "path", "path": "tables/loans",          "values": ["POST"] },
+    { "operation": "loans.read",   "match_type": "path", "path": "tables/loans/**",       "values": ["GET", "HEAD"] },
+    { "operation": "loans.update", "match_type": "path", "path": "tables/loans/{id}",     "values": ["PATCH"] },
+    { "operation": "reports.run",  "match_type": "path", "path": "queries/overdue-loans", "values": ["POST"] }
+  ],
+  "permissions": {
+    "loans.read":   ["analyst", "loan_officer"],
+    "loans.create": ["loan_officer"],
+    "loans.update": ["loan_officer"],
+    "reports.run":  ["analyst"]
+  },
+  "env_from_secret": { "DATABASE_URL": "finance-db/DATABASE_URL" }
+}
+```
+
+The service reads the caller's verified identity from `x-amoeba-user`, `x-amoeba-org`, and `x-amoeba-roles`, which the gateway sets from the token and which a client cannot forge.
+
+### 8.7 Open questions
+
+- **Which databases.** PostgreSQL is the first target. The design leans on PostgreSQL features (JSON aggregation, row-level security), so other engines need their own work.
+- **Where definitions are stored and approved.** The service only needs a store it can load from; the approval workflow in front of it is up to the operator.
+
+Feedback on this design is welcome in the issue tracker.
+
+---
+
+## 9. Nightly End-to-End Test on DigitalOcean
 
 A Python orchestrator spins up a DigitalOcean droplet, installs Caddy and Amoeba, exercises the admin/proxy APIs, verifies scale-to-zero, and destroys the droplet. It is designed to run nightly in GitHub Actions.
 
-### 8.1 Required GitHub Secrets
+### 9.1 Required GitHub Secrets
 
 | Secret | Purpose |
 |---|---|
@@ -850,7 +1035,7 @@ A Python orchestrator spins up a DigitalOcean droplet, installs Caddy and Amoeba
 | `AMOEBA_LOCAL_JWT_SECRET` | Amoeba JWT signing secret |
 | `AMOEBA_AGE_SECRET_KEY` (optional) | Age identity for encrypted app secrets |
 
-### 8.2 Files
+### 9.2 Files
 
 - `scripts/e2e-do.py` — thin wrapper that invokes pytest
 - `scripts/e2e/` — pytest test suite and shared fixtures
@@ -861,7 +1046,7 @@ A Python orchestrator spins up a DigitalOcean droplet, installs Caddy and Amoeba
 - `scripts/e2e-cloud-init.sh` — cloud-init user-data that provisions the droplet
 - `.github/workflows/nightly-e2e.yml` — GitHub Actions schedule
 
-### 8.3 Run locally
+### 9.3 Run locally
 
 ```bash
 export DIGITALOCEAN_TOKEN="dop_v1_..."
@@ -881,7 +1066,7 @@ Add `--keep-droplet` to leave the droplet alive for debugging. You can also run 
 pytest scripts/e2e/ -v
 ```
 
-### 8.4 What the test verifies
+### 9.4 What the test verifies
 
 1. Droplet creation and SSH readiness.
 2. Amoeba + Caddy come up via Docker Compose.
