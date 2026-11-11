@@ -130,11 +130,25 @@ Amoeba is designed for environments where you want control without operational o
 | Scale-to-zero for single containers and compose stacks, capacity budgets | Shipped |
 | Streaming responses (SSE, Streamable HTTP for MCP) | Shipped |
 | App packages, web console deploys, source builds, `amoeba-mcp` | Shipped |
-| [Database service](#8-database-service-planned): approved queries, table CRUD, column masking | Planned, in design |
-| Pluggable secret backends (Vault, HTTP provider) | Planned |
-| External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned |
+| [Database service](#8-database-service) (PostgreSQL): approved queries, table CRUD, column masking, MCP tools | Shipped |
+| Pluggable secret backends (Vault, HTTP provider) | Planned (phase 3) |
+| External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned (phase 5) |
 
 **Current limits:** every service must be a container or compose stack that Amoeba starts; the hop from Amoeba to the service is plain `http://` on a private network; WebSocket upgrades are not proxied; request bodies are capped at 10 MB.
+
+### Roadmap
+
+The goal: AI agents and AI-built apps can use any internal system or external API through Amoeba, and no code they write or run ever holds a production credential.
+
+| Phase | What it delivers | State |
+|---|---|---|
+| **1. Gateway foundations** | Requests fail closed when a backend credential is missing; path-based operation rules (`loans.create`); verified roles forwarded as `x-amoeba-roles` | Done |
+| **2. Database service** | Approved queries and table CRUD over PostgreSQL; show/mask/hide columns per role; read-only reads, row caps with rollback, org scoping, audit; MCP tools filtered by role ([section 8](#8-database-service)) | Done, except idempotency keys on creates |
+| **3. Secret providers** | Pluggable secret sources behind one interface: files (today), environment, HashiCorp Vault, and an HTTP provider that fetches by reference with a short cache and fails closed | Planned |
+| **4. AptiWise integration** | AptiWise as the control plane: serves secrets to Amoeba under a scoped identity, maps identity-provider groups to Amoeba roles, and runs query approval (table allowlist, read-only check, limits, a column-by-role approval screen) | Planned |
+| **5. Egress: external upstreams** | A service that is just an HTTPS URL (Stripe, a CRM, another server), with no container. Amoeba checks the caller, injects the real API key, and logs the call, so AI-built apps can use any API without holding its key | Planned |
+
+Open decisions: other databases (SQL Server, Oracle) need their own work in phase 2, and whether the HTTP provider or Vault comes first in phase 3 depends on where AptiWise runs for clients (hosted, or on their servers).
 
 ---
 
