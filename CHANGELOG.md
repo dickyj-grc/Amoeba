@@ -12,6 +12,10 @@
 
 - **`local_upstream`** in `amoeba.yaml` (console: "Call as a local client") makes the gateway drop the browser's `Origin` and send `Host: localhost:<port>`. Apps that only accept local callers, such as Lightpanda's MCP server, otherwise answer `403 Origin not allowed`.
 
+### Security
+
+- **Console test runner upgraded to Vitest 4.1.12.** Clears all six Dependabot alerts (three critical) in `vitest`, `@vitest/mocker` and `tinypool`. They were dev-only: none of these ship in the images or the built console.
+
 ## 0.1.2 — 2026-11-11
 
 ### Upgrade notes
