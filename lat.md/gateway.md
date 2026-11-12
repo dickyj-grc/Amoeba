@@ -58,3 +58,21 @@ Implemented by [[src/routing/proxy.rs#apply_upstream_auth]]. Per-request secret 
 A configured credential that cannot be produced rejects the request with `503` and `x-amoeba-rejection-reason: secret-unavailable` instead of forwarding.
 
 This covers an unset or empty env var, a missing or empty `token_secret` file, a missing token source or `header_name`, an unknown `type`, or a value that is not a valid header. The old behaviour sent `Bearer ` with an empty token.
+
+## Service status
+
+`GET /admin/apps/<name>` reports the install lifecycle (`installed`, `pulling`, `ready`, `error` with a message) and a `runtime` block: `running`, `active_requests`, `last_request_at`, `port`, `public`.
+
+[[src/routing/apps_admin.rs#app_status]] builds it. The console's table maps it with [[web/src/lib/services.ts#toServiceItem]] to Running, Preparing, Idle or Error, and shows the error message and port.
+
+### Run state
+
+The gateway records whether it last started or stopped each workload; `running` is `null` until it has done either, e.g. after a gateway restart.
+
+[[src/lifecycle/container.rs#should_stop]] keeps the reaper from stopping a workload it already stopped. Before this, an idle service was "scaled to zero" again on every 10-second sweep.
+
+### Not ready names the port
+
+When nothing answers on the service's port, the error says which port and, if the image suggests another, which one to use instead.
+
+[[src/apps/manager.rs#ports_from_image_config]] reads `EXPOSE`d ports and `--port N`/`--port=N`/`-p N` from the image's entrypoint and command, since many images (Lightpanda's among them) skip `EXPOSE`. [[src/apps/manager.rs#not_ready_message]] words the error; [[src/apps/manager.rs#spawn_readiness_probe]] sets it on the app after inspecting the image with `docker image inspect` or, on Apple containers, `container image inspect`. The proxy returns these reasons as the 503 body, not just the `x-amoeba-rejection-reason` header, so the console's Test dialog and curl show them.

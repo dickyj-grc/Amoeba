@@ -6,6 +6,7 @@ import {
   ServiceItem,
   ServiceTokenResponse,
 } from '../types/amoeba';
+import { toServiceItem } from '../lib/services';
 
 class AmoebaApiClient {
   private get baseUrl(): string {
@@ -90,21 +91,11 @@ class AmoebaApiClient {
           const status = await this.request<AppStatusResponse>(`/admin/apps/${encodeURIComponent(name)}`, {
             method: 'GET',
           });
-          return {
-            name,
-            state: status.state,
-          };
+          return toServiceItem(status);
         } catch (e) {
           return {
             name,
-            state: {
-              phase: 'Cold' as const,
-              generation: 0,
-              observed_generation: 0,
-              ready: false,
-              healthy: false,
-              active_requests: 0,
-            },
+            state: { phase: 'Error' as const, active_requests: 0, error: 'status unavailable' },
           };
         }
       })

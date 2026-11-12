@@ -1,6 +1,6 @@
 //! Periodic sweep that scales idle services down to zero.
 
-use super::container::{now_unix, should_scale_to_zero};
+use super::container::{now_unix, should_stop};
 use crate::state::AppState;
 use std::sync::{Arc, atomic::Ordering};
 use tracing::{error, info};
@@ -28,7 +28,7 @@ pub fn spawn_reaper_thread(state: Arc<AppState>) {
                 let active = runtime.active_connections.load(Ordering::Relaxed);
                 let last = runtime.last_accessed_unix.load(Ordering::Relaxed);
 
-                if should_scale_to_zero(active, last, now, cooldown) {
+                if should_stop(runtime.is_running(), active, last, now, cooldown) {
                     info!(
                         service = %name,
                         idle_secs = %now.saturating_sub(last),
@@ -38,8 +38,9 @@ pub fn spawn_reaper_thread(state: Arc<AppState>) {
                     if let Some(driver) = drivers.get(name) {
                         // A failed stop just gets retried on the next sweep; it
                         // never blocks the reaper loop from checking other services.
-                        if let Err(e) = driver.stop().await {
-                            error!(service = %name, "failed to stop service: {e}");
+                        match driver.stop().await {
+                            Ok(()) => runtime.mark_stopped(),
+                            Err(e) => error!(service = %name, "failed to stop service: {e}"),
                         }
                     }
                 }

@@ -5,6 +5,7 @@
 ### Console
 
 - **Build progress.** Deploying from Git or a Dockerfile now shows elapsed time, the command running and the live build log, updated every 2 seconds, with a "Stop build" button. Before, the button just said "Building image..." until the build ended.
+- **Real service status.** The table showed every service as "Idle (Scale-to-Zero)", because it read fields the gateway never sent. It now shows Running, Preparing, Idle or Error, with the error message and the service's port.
 - **Less flicker.** The 3-second refresh no longer shows a loading state, skips re-rendering when nothing changed, and pauses while the tab is hidden. Services stay in a fixed order; before, they could reshuffle on every refresh.
 
 ### Gateway
@@ -12,6 +13,9 @@
 - **`GET` and `DELETE /admin/apps/<name>/build`** report and cancel the latest build. A second build for the same name while one runs is `409`. Cancelling kills the build's whole process group.
 - **`AMOEBA_BUILD_TIMEOUT_SECS`** overrides the 15-minute build timeout, for large projects.
 - **`GET /admin/apps`** returns names sorted.
+- **`GET /admin/apps/<name>`** adds a `runtime` block: `running`, `active_requests`, `last_request_at`, `port`, `public`.
+- **Readiness errors name the port.** "nothing answered on port 8080", plus the port the image suggests when it differs, e.g. 9222 for `lightpanda/browser`, read from its `EXPOSE` or `--port` in its command. A 503 for an app that failed or is still preparing now carries the reason in its body.
+- **The reaper stops an idle service once.** It used to stop an already-stopped service again on every 10-second sweep.
 
 ## 0.1.4 — 2026-11-11
 

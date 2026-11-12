@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  AlertTriangle,
   ExternalLink,
   Key,
   Moon,
@@ -59,14 +60,14 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
         return (
           <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-400 border border-amber-500/20">
             <RefreshCw className="h-3 w-3 animate-spin" />
-            Cold-Booting
+            Preparing
           </span>
         );
-      case 'Cooling':
+      case 'Error':
         return (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-indigo-400 border border-indigo-500/20">
-            <Moon className="h-3 w-3" />
-            Cooling Down
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-red-500/10 px-2.5 py-1 text-xs font-medium text-red-400 border border-red-500/20">
+            <AlertTriangle className="h-3 w-3" />
+            Error
           </span>
         );
       case 'Cold':
@@ -153,9 +154,17 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
                         {service.name}
                       </span>
                     </div>
+                    {service.port !== undefined && (
+                      <span className="text-[11px] text-muted-foreground font-mono">port {service.port}</span>
+                    )}
                   </td>
                   <td className="py-3.5 px-4">
                     {renderStatusBadge(service.state.phase)}
+                    {service.state.error && (
+                      <p className="mt-1 max-w-xs text-[11px] leading-snug text-red-400/90 break-words">
+                        {service.state.error}
+                      </p>
+                    )}
                   </td>
                   <td className="py-3.5 px-4">
                     <a

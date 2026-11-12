@@ -19,6 +19,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// Response body returned after a successful install.
@@ -106,6 +107,21 @@ pub async fn list_apps(
 pub struct AppStatusResponse {
     pub name: String,
     pub state: AppLifecycleSnapshot,
+    pub runtime: AppRuntimeStatus,
+}
+
+/// What the gateway knows about the running workload.
+#[derive(Serialize)]
+pub struct AppRuntimeStatus {
+    /// `true` after the gateway started it, `false` after it scaled it to
+    /// zero, `null` when it has done neither since it started.
+    pub running: Option<bool>,
+    pub active_requests: u64,
+    /// Unix seconds of the last proxied request; absent before the first.
+    pub last_request_at: Option<u64>,
+    /// The port the gateway sends traffic to.
+    pub port: u16,
+    pub public: bool,
 }
 
 pub async fn get_app_status(
@@ -121,15 +137,36 @@ pub async fn get_app_status(
         ));
     }
 
+    Ok(Json(app_status(&state, app_name)))
+}
+
+/// Lifecycle state plus what the gateway knows about the running workload.
+fn app_status(state: &AppState, app_name: String) -> AppStatusResponse {
     let snapshot = state
         .app_state(&app_name)
         .map(|s| s.snapshot())
         .unwrap_or_else(|| AppLifecycleState::installed().snapshot());
 
-    Ok(Json(AppStatusResponse {
+    let service = state.catalog.load().services.get(&app_name).cloned();
+    let runtime = state.runtime_states.load().get(&app_name).cloned();
+    let runtime = AppRuntimeStatus {
+        running: runtime.as_ref().and_then(|r| r.is_running()),
+        active_requests: runtime
+            .as_ref()
+            .map_or(0, |r| r.active_connections.load(Ordering::Relaxed)),
+        last_request_at: runtime
+            .as_ref()
+            .filter(|r| r.has_activated.load(Ordering::Relaxed))
+            .map(|r| r.last_accessed_unix.load(Ordering::Relaxed)),
+        port: service.as_ref().map_or(0, |s| s.placement.port),
+        public: service.as_ref().is_some_and(|s| s.public),
+    };
+
+    AppStatusResponse {
         name: app_name,
         state: snapshot,
-    }))
+        runtime,
+    }
 }
 
 pub async fn uninstall_app(
@@ -162,16 +199,7 @@ pub async fn update_app_policy(
         .await
         .map_err(map_manager_error)?;
     reload_catalog(&state);
-
-    let snapshot = state
-        .app_state(&app_name)
-        .map(|s| s.snapshot())
-        .unwrap_or_else(|| AppLifecycleState::installed().snapshot());
-
-    Ok(Json(AppStatusResponse {
-        name: app_name,
-        state: snapshot,
-    }))
+    Ok(Json(app_status(&state, app_name)))
 }
 
 /// Default lifetime of a service token, kept short for one-off testing.

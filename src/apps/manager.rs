@@ -820,6 +820,7 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
         // before anyone ever gets to use it.
         if let Some(runtime) = state.runtime_states.load().get(&app_name) {
             runtime.touch();
+            runtime.mark_running();
             if let Some(host) = &resolved_host {
                 runtime.set_resolved_host(host.clone());
             }
@@ -831,9 +832,13 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
             .as_deref()
             .unwrap_or_else(|| service_cfg.upstream_host());
         if !wait_until_ready(host, service_cfg.placement.port).await {
+            let hint = match &service_cfg.container {
+                Some(c) => image_ports(&c.image, apple).await,
+                None => Vec::new(),
+            };
             app_state.transition(
                 LifecycleStatus::Error,
-                Some("service did not become ready in time".to_string()),
+                Some(not_ready_message(service_cfg.placement.port, &hint)),
             );
             return;
         }
@@ -984,6 +989,91 @@ fn edit_role_list(map: &mut HashMap<String, Vec<String>>, operation: &str, role:
     } else {
         roles.retain(|existing| existing != role);
     }
+}
+
+/// Why an app is not ready, naming the port that never answered and, when
+/// the image suggests others, those ports.
+pub fn not_ready_message(port: u16, image_ports: &[u16]) -> String {
+    let mut message = format!(
+        "nothing answered on port {port}; check that the app listens on the port set at deploy"
+    );
+    let others: Vec<String> = image_ports
+        .iter()
+        .filter(|&&p| p != port)
+        .map(u16::to_string)
+        .collect();
+    if !others.is_empty() {
+        message.push_str(&format!(
+            " (the image suggests port {}; redeploy with that port)",
+            others.join(" or ")
+        ));
+    }
+    message
+}
+
+/// Ports an image declares or starts on: its `EXPOSE`d ports, then any
+/// `--port N`, `--port=N` or `-p N` in its entrypoint and command. Images
+/// often skip `EXPOSE`, so the command is the more useful hint.
+pub fn ports_from_image_config(config: &serde_json::Value) -> Vec<u16> {
+    let mut ports: Vec<u16> = Vec::new();
+    let mut add = |p: u16| {
+        if !ports.contains(&p) {
+            ports.push(p);
+        }
+    };
+    if let Some(exposed) = config.get("ExposedPorts").and_then(|v| v.as_object()) {
+        for key in exposed.keys() {
+            if let Some(p) = key.split('/').next().and_then(|p| p.parse().ok()) {
+                add(p);
+            }
+        }
+    }
+    let args: Vec<&str> = ["Entrypoint", "Cmd"]
+        .iter()
+        .filter_map(|k| config.get(*k).and_then(|v| v.as_array()))
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(p) = arg.strip_prefix("--port=").and_then(|p| p.parse().ok()) {
+            add(p);
+        } else if (*arg == "--port" || *arg == "-p")
+            && let Some(p) = args.get(i + 1).and_then(|p| p.parse().ok())
+        {
+            add(p);
+        }
+    }
+    ports
+}
+
+/// [`ports_from_image_config`] for a local image, read with `docker image
+/// inspect` or, for Apple containers, `container image inspect`. Empty when
+/// the image cannot be inspected.
+async fn image_ports(image: &str, apple: bool) -> Vec<u16> {
+    let program = if apple { "container" } else { "docker" };
+    let Ok(output) = Command::new(program)
+        .args(["image", "inspect", image])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    let first = json.get(0).unwrap_or(&json);
+    // Docker: `[{"Config": {...}}]`. Apple: `[{"variants": [{"config": {"config": {...}}}]}]`.
+    let config = first.get("Config").or_else(|| {
+        first
+            .get("variants")
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("config"))
+            .and_then(|c| c.get("config"))
+    });
+    config.map(ports_from_image_config).unwrap_or_default()
 }
 
 async fn local_image_present(image: &str) -> bool {
@@ -1249,6 +1339,29 @@ schema:
             .unwrap();
         let catalog = load_catalog(&catalog_path).unwrap();
         assert!(catalog.services["test-image"].local_upstream);
+    }
+
+    // @lat: [[gateway#Service status#Not ready names the port]]
+    #[test]
+    fn not_ready_names_the_port_and_the_image_hint() {
+        // Lightpanda's published image: no EXPOSE, port only in its command.
+        let config = serde_json::json!({
+            "Cmd": ["/bin/lightpanda", "serve", "--host", "0.0.0.0", "--port", "9222"],
+            "Entrypoint": ["/usr/bin/tini", "--"],
+        });
+        let ports = ports_from_image_config(&config);
+        assert_eq!(ports, [9222]);
+        assert_eq!(
+            not_ready_message(8080, &ports),
+            "nothing answered on port 8080; check that the app listens on the port set at deploy (the image suggests port 9222; redeploy with that port)"
+        );
+        assert!(!not_ready_message(9222, &ports).contains("suggests"));
+
+        let exposed = serde_json::json!({
+            "ExposedPorts": {"3000/tcp": {}},
+            "Cmd": ["node", "server.js", "--port=3000"],
+        });
+        assert_eq!(ports_from_image_config(&exposed), [3000]);
     }
 
     // @lat: [[secrets#Gateway credential from a secret]]

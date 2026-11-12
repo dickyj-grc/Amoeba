@@ -9,8 +9,8 @@ interface StatsCardsProps {
 
 export const StatsCards: React.FC<StatsCardsProps> = ({ services, isLoading }) => {
   const total = services.length;
-  const warmCount = services.filter((s) => s.state.phase === 'Warm' || s.state.phase === 'Warming').length;
-  const coldCount = services.filter((s) => s.state.phase === 'Cold' || s.state.phase === 'Installed').length;
+  const warmCount = services.filter((s) => s.state.phase === 'Warm').length;
+  const coldCount = services.filter((s) => s.state.phase === 'Cold').length;
   const activeRequests = services.reduce((acc, s) => acc + (s.state.active_requests || 0), 0);
 
   return (
