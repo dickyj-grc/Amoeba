@@ -1,7 +1,7 @@
 //! Container start/stop, active connection counting, cooldown timers.
 
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -22,7 +22,15 @@ pub struct ServiceRuntimeState {
     /// `set_resolved_host` (Docker/Compose), in which case the proxy falls
     /// back to the static `placement.ip`/`primary_service` config value.
     resolved_host: RwLock<Option<String>>,
+    /// Whether the gateway last started or stopped the workload, as
+    /// `RUN_UNKNOWN`/`RUN_RUNNING`/`RUN_STOPPED`. Unknown until the first
+    /// start or stop, e.g. after a gateway restart with containers still up.
+    run_state: AtomicU8,
 }
+
+const RUN_UNKNOWN: u8 = 0;
+const RUN_RUNNING: u8 = 1;
+const RUN_STOPPED: u8 = 2;
 
 impl ServiceRuntimeState {
     pub fn new() -> Self {
@@ -31,6 +39,25 @@ impl ServiceRuntimeState {
             active_connections: AtomicU64::new(0),
             has_activated: AtomicBool::new(false),
             resolved_host: RwLock::new(None),
+            run_state: AtomicU8::new(RUN_UNKNOWN),
+        }
+    }
+
+    pub fn mark_running(&self) {
+        self.run_state.store(RUN_RUNNING, Ordering::Relaxed);
+    }
+
+    pub fn mark_stopped(&self) {
+        self.run_state.store(RUN_STOPPED, Ordering::Relaxed);
+    }
+
+    /// `Some(true)` after a start, `Some(false)` after a stop, `None` before
+    /// either.
+    pub fn is_running(&self) -> Option<bool> {
+        match self.run_state.load(Ordering::Relaxed) {
+            RUN_RUNNING => Some(true),
+            RUN_STOPPED => Some(false),
+            _ => None,
         }
     }
 
@@ -94,6 +121,25 @@ pub fn should_scale_to_zero(
     cooldown_seconds: u64,
 ) -> bool {
     active_connections == 0 && now_unix.saturating_sub(last_accessed_unix) >= cooldown_seconds
+}
+
+/// Whether the reaper should stop a service now: idle past its cooldown and
+/// not already known to be stopped. Without the second check a stopped
+/// service was "stopped" again on every sweep.
+pub fn should_stop(
+    running: Option<bool>,
+    active_connections: u64,
+    last_accessed_unix: u64,
+    now_unix: u64,
+    cooldown_seconds: u64,
+) -> bool {
+    running != Some(false)
+        && should_scale_to_zero(
+            active_connections,
+            last_accessed_unix,
+            now_unix,
+            cooldown_seconds,
+        )
 }
 
 /// Whether a service is currently occupying its machine's capacity budget:
@@ -207,5 +253,20 @@ mod tests {
     #[test]
     fn is_occupying_capacity_false_once_cooldown_elapsed() {
         assert!(!is_occupying_capacity(Some(60), true, 0, 100, 200));
+    }
+
+    // @lat: [[gateway#Service status#Run state]]
+    #[test]
+    fn reaper_stops_an_idle_service_once() {
+        let state = ServiceRuntimeState::new();
+        assert_eq!(state.is_running(), None);
+        // Unknown (e.g. after a gateway restart): stop it to be safe.
+        assert!(should_stop(state.is_running(), 0, 0, 1_000, 300));
+        state.mark_stopped();
+        assert!(!should_stop(state.is_running(), 0, 0, 1_000, 300));
+        state.mark_running();
+        assert_eq!(state.is_running(), Some(true));
+        assert!(should_stop(state.is_running(), 0, 0, 1_000, 300));
+        assert!(!should_stop(state.is_running(), 1, 0, 1_000, 300));
     }
 }

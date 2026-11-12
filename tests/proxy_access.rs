@@ -331,3 +331,45 @@ async fn catalog_rejects_both_access_forms() {
     assert!(amoeba::config::watcher::load_catalog(&path).is_err());
     std::fs::remove_file(&path).ok();
 }
+
+// @lat: [[gateway#Service status#Not ready names the port]]
+#[tokio::test]
+async fn a_failed_app_answers_503_with_the_reason_in_the_body() {
+    use amoeba::apps::state::LifecycleStatus;
+
+    let path = temp_services_file("failed-app");
+    write_catalog(&path, container_service(json!({ "public": true })));
+    // Not build_app, which marks the service ready: here its probe failed.
+    let failed = AppLifecycleState::installed();
+    failed.transition(
+        LifecycleStatus::Error,
+        Some("nothing answered on port 8080".into()),
+    );
+    let jwt_engine = std::sync::Arc::new(local_engine(JWT_SECRET));
+    let state = AppState::new(&path, "/nonexistent/users.json", jwt_engine, None);
+    state.set_app_state("svc", std::sync::Arc::new(failed));
+    let app = Router::new()
+        .route("/v1/:service_name/*subpath", any(proxy_handler))
+        .with_state(state);
+
+    let res = app
+        .oneshot(get_request("/v1/svc/health", None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        res.headers()
+            .get("x-amoeba-rejection-reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("app-error")
+    );
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "app 'svc' failed to start: nothing answered on port 8080"
+    );
+
+    std::fs::remove_file(&path).ok();
+}

@@ -1,11 +1,9 @@
+/** How the console shows a service, derived from the gateway's status. */
 export interface AppLifecycleSnapshot {
-  phase: 'Cold' | 'Warming' | 'Warm' | 'Cooling' | 'Error' | 'Installed';
-  generation: number;
-  observed_generation: number;
-  ready: boolean;
-  healthy: boolean;
+  /** Warm: running. Warming: being prepared. Cold: scaled to zero or not
+   *  started yet. Error: preparation failed; `error` says why. */
+  phase: 'Cold' | 'Warming' | 'Warm' | 'Error';
   active_requests: number;
-  last_activity?: string;
   error?: string;
 }
 
@@ -23,9 +21,21 @@ export interface AppsListResponse {
   apps: string[];
 }
 
+/** `GET /admin/apps/<name>` as the gateway sends it. */
 export interface AppStatusResponse {
   name: string;
-  state: AppLifecycleSnapshot;
+  state: {
+    state: 'installed' | 'pulling' | 'ready' | 'error';
+    message: string | null;
+    updated_at: number;
+  };
+  runtime?: {
+    running: boolean | null;
+    active_requests: number;
+    last_request_at: number | null;
+    port: number;
+    public: boolean;
+  };
 }
 
 export interface LoginResponse {

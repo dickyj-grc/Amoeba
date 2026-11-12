@@ -1,6 +1,7 @@
 //! Extracts service_name/subpath from the incoming path and dispatches upstream.
 
 use super::operation::{AccessDeny, authorize, resolve_operation};
+use crate::apps::manager::not_ready_message;
 use crate::apps::state::AppLifecycleState;
 use crate::auth::Claims;
 use crate::auth::middleware::verify_request_token;
@@ -35,6 +36,17 @@ pub fn build_target_url(host: &str, port: u16, subpath: &str) -> String {
 /// the driver failing to start the service vs. it never becoming ready) that
 /// operators — and this module's own tests — need to tell apart.
 const REJECTION_REASON_HEADER: &str = "x-amoeba-rejection-reason";
+
+/// A rejection whose body explains it in plain text, for the console and
+/// curl users; the header still carries the machine-readable reason.
+fn rejection_with(status: StatusCode, reason: &'static str, detail: String) -> Response {
+    Response::builder()
+        .status(status)
+        .header(REJECTION_REASON_HEADER, reason)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from(detail))
+        .unwrap()
+}
 
 fn rejection(status: StatusCode, reason: &'static str) -> Response {
     Response::builder()
@@ -248,12 +260,23 @@ pub async fn proxy_handler(
     // first request from blocking on a slow or failing image pull.
     if let Some(app_state) = state.app_state(&service_name) {
         if !app_state.is_ready() {
-            let reason = if app_state.is_error() {
-                "app-error"
+            let (reason, detail) = if app_state.is_error() {
+                let message = app_state.snapshot().message.unwrap_or_default();
+                (
+                    "app-error",
+                    format!("app '{service_name}' failed to start: {message}"),
+                )
             } else {
-                "app-not-ready"
+                (
+                    "app-not-ready",
+                    format!("app '{service_name}' is still being prepared; retry shortly"),
+                )
             };
-            return Ok(rejection(StatusCode::SERVICE_UNAVAILABLE, reason));
+            return Ok(rejection_with(
+                StatusCode::SERVICE_UNAVAILABLE,
+                reason,
+                detail,
+            ));
         }
     } else {
         // Services that pre-date the lifecycle state map are treated as ready
@@ -395,8 +418,11 @@ pub async fn proxy_handler(
                 // start, no stable DNS name) -- cache it for this and future
                 // (warm) requests. Docker/Compose return `None`: their static
                 // `placement.ip`/`primary_service` is already correct.
-                Ok(Some(host)) => runtime.set_resolved_host(host),
-                Ok(None) => {}
+                Ok(Some(host)) => {
+                    runtime.set_resolved_host(host);
+                    runtime.mark_running();
+                }
+                Ok(None) => runtime.mark_running(),
                 Err(e) => {
                     error!(service = %service_name, "failed to start service: {e}");
                     return Ok(rejection(
@@ -412,9 +438,10 @@ pub async fn proxy_handler(
             .unwrap_or_else(|| service_cfg.upstream_host().to_string());
         if !wait_until_ready(&host, service_cfg.placement.port).await {
             error!(service = %service_name, "service did not become ready in time");
-            return Ok(rejection(
+            return Ok(rejection_with(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "driver-not-ready",
+                not_ready_message(service_cfg.placement.port, &[]),
             ));
         }
     }
