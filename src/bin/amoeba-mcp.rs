@@ -930,6 +930,7 @@ async fn install_app_on_amoeba(
         author: "amoeba-mcp".into(),
         app: amoeba::apps::schema::AppSpec::Image {
             image: image.to_string(),
+            command: Vec::new(),
         },
         placement: amoeba::apps::schema::PlacementSpec {
             port,
@@ -944,6 +945,7 @@ async fn install_app_on_amoeba(
         upstream_auth: None,
         operation_rules: Vec::new(),
         local_upstream: false,
+        interface: None,
         resources: if memory.is_some() || cpu_cores.is_some() {
             Some(amoeba::apps::schema::ResourceSpec {
                 memory: memory.map(|m| m.to_string()),
@@ -962,6 +964,7 @@ async fn install_app_on_amoeba(
                         amoeba::apps::schema::EnvField {
                             description: String::new(),
                             r#type: "string".into(),
+                            required: false,
                             default: Some(v.clone()),
                             options: None,
                         },

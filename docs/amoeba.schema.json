@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dickyj-grc/Amoeba/main/docs/amoeba.schema.json",
+  "title": "Amoeba app package manifest (amoeba.yaml)",
+  "description": "How Amoeba runs an app and how callers use it. Reference: https://github.com/dickyj-grc/Amoeba/blob/main/docs/manifest.md",
+  "type": "object",
+  "required": ["api_version", "name", "app", "placement"],
+  "additionalProperties": false,
+  "properties": {
+    "api_version": { "const": "v1" },
+    "name": {
+      "type": "string",
+      "description": "Service name and URL segment (/v1/<name>/). Lowercase letters, digits, '.', '_' and '-'.",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "version": { "type": "string" },
+    "description": { "type": "string" },
+    "author": { "type": "string" },
+    "app": {
+      "description": "What to run: one image, or a compose stack.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "image"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "image" },
+            "image": { "type": "string", "description": "Image reference, e.g. lightpanda/browser:latest." },
+            "command": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Replaces the image's CMD (its ENTRYPOINT stays), like the arguments after the image in `docker run`. ${PORT} becomes placement.port; no other ${...} is allowed."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "compose_file"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "compose" },
+            "compose_file": { "type": "string", "description": "Compose file inside the package. Its services join the external network amoeba-net." },
+            "primary_service": { "type": "string", "description": "Compose service to route to. Defaults to name." }
+          }
+        }
+      ]
+    },
+    "placement": {
+      "type": "object",
+      "required": ["port"],
+      "additionalProperties": false,
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Port the app listens on inside its container. Also ${PORT} in app.command and the PORT env var of image apps." },
+        "cooldown_seconds": { "type": "integer", "minimum": 0, "description": "Idle seconds before the app is stopped (scale to zero). Omit to keep it running." },
+        "machine": { "type": "string" },
+        "runtime": { "type": "string", "description": "OCI runtime for the Docker driver, e.g. runsc." }
+      }
+    },
+    "permissions": { "$ref": "#/$defs/permissions" },
+    "operation_rules": {
+      "type": "array",
+      "description": "Ordered rules naming operations by path and method; first match wins.",
+      "items": {
+        "type": "object",
+        "required": ["operation"],
+        "additionalProperties": false,
+        "properties": {
+          "operation": { "type": "string" },
+          "match_type": { "enum": ["path", "http_method"], "default": "http_method" },
+          "path": { "type": "string", "description": "Subpath pattern: {id} and * match one segment, a trailing ** the rest." },
+          "values": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "tenant": { "type": "string", "description": "Only this org may call. Not with tenant_permissions or public." },
+    "tenant_permissions": {
+      "type": "object",
+      "description": "Org to its own permissions map. Replaces permissions.",
+      "additionalProperties": { "$ref": "#/$defs/permissions" }
+    },
+    "public": { "type": "boolean", "default": false, "description": "Skip authentication entirely." },
+    "upstream_auth": {
+      "type": "object",
+      "required": ["type", "secret"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["bearer_static", "custom_header"] },
+        "secret": { "type": "string", "description": "A key declared in schema.secrets." },
+        "header_name": { "type": "string", "description": "Required for custom_header." }
+      }
+    },
+    "local_upstream": {
+      "type": "boolean",
+      "default": false,
+      "description": "Call the app as a local client: no browser Origin, Host: localhost:<port>. For apps that refuse remote or browser callers."
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "memory": { "type": "string", "description": "e.g. 512Mi, 1Gi." },
+        "cpu_cores": { "type": "integer", "minimum": 0 },
+        "gpu_vram": { "type": "string" }
+      }
+    },
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "type": "object",
+          "description": "Non-secret settings the installer provides, passed as environment variables. Undeclared keys are refused.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "description": { "type": "string" },
+              "type": { "enum": ["string", "number", "integer", "boolean"], "default": "string" },
+              "required": { "type": "boolean", "default": false, "description": "Install fails without a value unless there is a default." },
+              "default": { "type": "string", "description": "Used when the installer leaves it empty. Must match type and options." },
+              "options": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Allowed values." }
+            }
+          }
+        },
+        "secrets": {
+          "type": "object",
+          "description": "Sensitive values, stored outside the catalog and package.",
+          "propertyNames": { "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "description": { "type": "string" },
+              "required": { "type": "boolean", "default": true },
+              "validation_pattern": { "type": "string" },
+              "inject": { "enum": ["env", "proxy"], "default": "env" },
+              "file": { "type": "string", "description": "Age-encrypted file in the package holding the value." }
+            }
+          }
+        }
+      }
+    },
+    "interface": {
+      "type": "object",
+      "description": "How callers use the app; shown by the console after deploy.",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["mcp", "openapi", "http", "cdp"] },
+        "path": { "type": "string", "pattern": "^/", "description": "Where the API lives under /v1/<name>, e.g. /mcp." },
+        "summary": { "type": "string" },
+        "docs": { "type": "string", "pattern": "^https?://" },
+        "try": {
+          "type": "object",
+          "required": ["method", "path"],
+          "additionalProperties": false,
+          "properties": {
+            "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+            "path": { "type": "string", "pattern": "^/" },
+            "body": { "description": "JSON request body." }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "permissions": {
+      "type": "object",
+      "description": "Operation (read, add, update, delete, or a name from operation_rules) to the roles allowed. Console tokens carry the role mcp:<name>.",
+      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}

@@ -54,6 +54,11 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_upstream: bool,
 
+    /// How to call the app once deployed (protocol, path, docs, a sample
+    /// request), shown by the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<crate::config::schema::AppInterface>,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,
@@ -68,8 +73,13 @@ pub struct AppManifest {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppSpec {
-    /// Run a single container from a published image.
-    Image { image: String },
+    /// Run a single container from a published image. `command` replaces the
+    /// image's `CMD`, so one image can be run in another mode without a build.
+    Image {
+        image: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command: Vec<String>,
+    },
     /// Run a multi-service stack from a compose file inside the package.
     Compose {
         compose_file: String,
@@ -133,13 +143,46 @@ pub struct AppSchema {
 pub struct EnvField {
     #[serde(default)]
     pub description: String,
+    /// `string`, `number`, `integer` or `boolean`; install checks values against it.
     #[serde(default = "default_string")]
     pub r#type: String,
+    /// Install fails when no value is given and there is no `default`.
+    #[serde(default)]
+    pub required: bool,
     #[serde(default)]
     pub default: Option<String>,
+    /// When set, the value must be one of these.
     #[serde(default)]
     pub options: Option<Vec<String>>,
 }
+
+impl EnvField {
+    /// Checks one value against `type` and `options`.
+    pub fn check(&self, value: &str) -> Result<(), String> {
+        let expected = match self.r#type.as_str() {
+            "number" if !value.parse::<f64>().is_ok_and(f64::is_finite) => Some("a number"),
+            "integer" if value.parse::<i64>().is_err() => Some("an integer"),
+            "boolean" if !matches!(value, "true" | "false") => Some("true or false"),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            return Err(format!("must be {expected}"));
+        }
+        if let Some(options) = &self.options
+            && !options.iter().any(|o| o == value)
+        {
+            return Err(format!("must be one of: {}", options.join(", ")));
+        }
+        Ok(())
+    }
+
+    /// The value the app gets when the installer leaves it empty.
+    pub fn fallback(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+}
+
+pub const ENV_TYPES: &[&str] = &["string", "number", "integer", "boolean"];
 
 /// A sensitive value that must be written to Amoeba's secrets directory.
 /// The value can be supplied at install time via the `values` payload, or
@@ -228,7 +271,37 @@ pub struct PolicyPatch {
     pub revoke: Option<PolicyGrant>,
 }
 
+/// Placeholder in `app.command` for `placement.port`, so the port is written
+/// once. The app also gets it as the `PORT` env var.
+pub const PORT_PLACEHOLDER: &str = "${PORT}";
+
+/// Replaces [`PORT_PLACEHOLDER`] in each entry with `port`. Any other `${...}`
+/// is an error, so a typo fails at install instead of reaching the app.
+pub fn expand_command(command: &[String], port: u16) -> Result<Vec<String>, String> {
+    command
+        .iter()
+        .map(|arg| {
+            let expanded = arg.replace(PORT_PLACEHOLDER, &port.to_string());
+            match expanded.find("${") {
+                Some(at) => Err(format!(
+                    "app.command: unknown placeholder in {arg:?} at {:?}; only {PORT_PLACEHOLDER} is supported",
+                    &expanded[at..]
+                )),
+                None => Ok(expanded),
+            }
+        })
+        .collect()
+}
+
 impl AppManifest {
+    /// `app.command` with `${PORT}` filled in; empty for compose apps.
+    pub fn start_command(&self) -> Result<Vec<String>, String> {
+        match &self.app {
+            AppSpec::Image { command, .. } => expand_command(command, self.placement.port),
+            AppSpec::Compose { .. } => Ok(Vec::new()),
+        }
+    }
+
     /// The service key to use in Amoeba's `services.json`.
     pub fn service_name(&self) -> &str {
         &self.name

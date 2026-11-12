@@ -10,6 +10,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ServiceItem } from '../types/amoeba';
+import { interfaceLabel } from '../lib/library';
 
 interface ServicesTableProps {
   services: ServiceItem[];
@@ -176,6 +177,31 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
                       /v1/{service.name}/
                       <ExternalLink className="h-3 w-3 opacity-60" />
                     </a>
+                    {service.interface && (
+                      <p
+                        className="mt-1 max-w-xs text-[11px] leading-snug text-muted-foreground"
+                        title={service.interface.summary}
+                      >
+                        <span className="font-medium text-foreground">
+                          {interfaceLabel(service.interface.type)}
+                          {service.interface.path ? ` at ${service.interface.path}` : ''}
+                        </span>
+                        {service.interface.summary ? ` · ${service.interface.summary}` : ''}
+                        {service.interface.docs && (
+                          <>
+                            {' '}
+                            <a
+                              href={service.interface.docs}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-400 hover:underline"
+                            >
+                              Docs
+                            </a>
+                          </>
+                        )}
+                      </p>
+                    )}
                   </td>
                   <td className="py-3.5 px-4 text-center">
                     <span

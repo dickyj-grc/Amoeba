@@ -3,6 +3,7 @@ import {
   Code,
   FolderGit2,
   Layers,
+  Library,
   Loader2,
   Plus,
   Rocket,
@@ -23,6 +24,28 @@ import {
   validateServiceName,
   type EnvPair,
 } from '../lib/deployPackage';
+import { api } from '../api/client';
+import { libraryMatch } from '../lib/library';
+import { LibraryEntry } from '../types/amoeba';
+import { LibraryDeploy } from './LibraryDeploy';
+
+/** Offers the library setup when a typed image or repo is a known app. */
+const KnownAppHint: React.FC<{ entry?: LibraryEntry; onUse: (id: string) => void }> = ({ entry, onUse }) =>
+  entry ? (
+    <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-[11px]">
+      <span className="text-foreground">
+        Known app: <span className="font-semibold">{entry.title}</span>. The library sets its port, command and
+        API for you{entry.image ? ', with no build' : ''}.
+      </span>
+      <button
+        type="button"
+        onClick={() => onUse(entry.id)}
+        className="shrink-0 rounded px-2 py-1 font-medium text-blue-400 hover:bg-blue-500/10"
+      >
+        Use library setup
+      </button>
+    </div>
+  ) : null;
 
 interface DeployModalProps {
   isOpen: boolean;
@@ -35,7 +58,10 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   onClose,
   onDeploySuccess,
 }) => {
-  const [activeTab, setActiveTab] = useState<'git' | 'dockerfile' | 'image'>('git');
+  const [activeTab, setActiveTab] = useState<'library' | 'git' | 'dockerfile' | 'image'>('library');
+  // The app library, loaded when the dialog opens; null until then.
+  const [library, setLibrary] = useState<LibraryEntry[] | null>(null);
+  const [libraryPick, setLibraryPick] = useState<string | undefined>(undefined);
   const [name, setName] = useState('');
   const [gitUrl, setGitUrl] = useState('');
   const [dockerImage, setDockerImage] = useState('');
@@ -80,6 +106,14 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     };
   }, [phase]);
 
+  useEffect(() => {
+    if (!isOpen || library !== null) return;
+    api
+      .listLibrary()
+      .then(setLibrary)
+      .catch(() => setLibrary([]));
+  }, [isOpen, library]);
+
   // Keep the newest log line in view.
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -113,6 +147,8 @@ export const DeployModal: React.FC<DeployModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // The library tab deploys through its own form.
+    if (activeTab === 'library') return;
     const nameError = validateServiceName(name.trim());
     if (nameError) {
       setError(nameError);
@@ -201,7 +237,20 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         </div>
 
         {/* Source Tabs */}
-        <div className="flex gap-2 border-b border-border my-4 pb-2">
+        <div className="flex flex-wrap gap-2 border-b border-border my-4 pb-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('library')}
+            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              activeTab === 'library'
+                ? 'bg-primary text-primary-foreground font-semibold'
+                : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+            }`}
+          >
+            <Library className="h-3.5 w-3.5" />
+            <span>App library</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab('git')}
@@ -242,7 +291,19 @@ export const DeployModal: React.FC<DeployModalProps> = ({
           </button>
         </div>
 
-        {error && (
+        {activeTab === 'library' && (
+          <LibraryDeploy
+            entries={library}
+            initialId={libraryPick}
+            onDeployed={() => {
+              onDeploySuccess();
+              onClose();
+            }}
+            onCancel={onClose}
+          />
+        )}
+
+        {activeTab !== 'library' && error && (
           <div className="mb-4 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-xs text-destructive-foreground">
             {error}
             {buildLog.length > 0 && (
@@ -253,6 +314,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
           </div>
         )}
 
+        {activeTab !== 'library' && (
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
@@ -298,6 +360,13 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                 required
               />
+              <KnownAppHint
+                entry={library ? libraryMatch(library, gitUrl) : undefined}
+                onUse={(id) => {
+                  setLibraryPick(id);
+                  setActiveTab('library');
+                }}
+              />
             </div>
           )}
 
@@ -313,6 +382,13 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                 placeholder="e.g. python:3.11-slim, redis:7-alpine, myorg/api:v1"
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                 required
+              />
+              <KnownAppHint
+                entry={library ? libraryMatch(library, dockerImage) : undefined}
+                onUse={(id) => {
+                  setLibraryPick(id);
+                  setActiveTab('library');
+                }}
               />
             </div>
           )}
@@ -511,6 +587,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   );

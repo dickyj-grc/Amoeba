@@ -15,6 +15,7 @@ export interface ServiceItem {
   public?: boolean;
   memory?: string;
   cpu_cores?: number;
+  interface?: AppInterface;
 }
 
 export interface AppsListResponse {
@@ -36,6 +37,7 @@ export interface AppStatusResponse {
     port: number;
     public: boolean;
   };
+  interface?: AppInterface;
 }
 
 export interface LoginResponse {
@@ -76,4 +78,43 @@ export interface InspectRepoResponse {
     is_secret: boolean;
     description?: string;
   }[];
+}
+
+/** How to call a service, from its app package (`interface` in amoeba.yaml). */
+export interface AppInterface {
+  type: 'mcp' | 'openapi' | 'http' | 'cdp';
+  path?: string;
+  summary?: string;
+  docs?: string;
+  try?: { method: string; path: string; body?: unknown };
+}
+
+export interface LibraryField {
+  description: string;
+  /** The installer must fill it in (no default to fall back to). */
+  required: boolean;
+  default?: string;
+  /** Env vars only. */
+  type?: 'string' | 'number' | 'integer' | 'boolean';
+  options?: string[];
+}
+
+/** An app in the gateway's app library (`GET /admin/library`). */
+export interface LibraryEntry {
+  id: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  images: string[];
+  repos: string[];
+  default_name: string;
+  description: string;
+  image?: string;
+  command?: string[];
+  port: number;
+  public: boolean;
+  local_upstream: boolean;
+  interface?: AppInterface;
+  env: Record<string, LibraryField>;
+  secrets: Record<string, LibraryField>;
 }

@@ -6,6 +6,9 @@ RUN apk add --no-cache musl-dev build-base
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# The app library is compiled into the gateway.
+COPY library ./library
+COPY examples/app-packages ./examples/app-packages
 
 # Build release binaries (orchestrator + admin CLI) optimized for size and speed
 RUN cargo build --release --bin amoeba --bin amoeba-admin

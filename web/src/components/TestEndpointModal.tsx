@@ -12,9 +12,19 @@ export const TestEndpointModal: React.FC<TestEndpointModalProps> = ({
   service,
   onClose,
 }) => {
-  const [method, setMethod] = useState<'GET' | 'POST' | 'PUT' | 'DELETE'>('GET');
-  const [subpath, setSubpath] = useState('/');
-  const [requestBody, setRequestBody] = useState('{\n  "query": "hello amoeba"\n}');
+  // Start from the app's sample request when its package declares one.
+  const sample = service?.interface?.try;
+  const [method, setMethod] = useState<'GET' | 'POST' | 'PUT' | 'DELETE'>(
+    (['GET', 'POST', 'PUT', 'DELETE'].includes(sample?.method ?? '') ? sample!.method : 'GET') as
+      | 'GET'
+      | 'POST'
+      | 'PUT'
+      | 'DELETE',
+  );
+  const [subpath, setSubpath] = useState(sample?.path ?? '/');
+  const [requestBody, setRequestBody] = useState(
+    sample?.body !== undefined ? JSON.stringify(sample.body, null, 2) : '{\n  "query": "hello amoeba"\n}',
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<{
     status: number;

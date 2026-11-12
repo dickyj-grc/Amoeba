@@ -122,6 +122,7 @@ export const App: React.FC = () => {
       />
 
       <TestEndpointModal
+        key={selectedTestService?.name ?? 'none'}
         service={selectedTestService}
         onClose={() => setSelectedTestService(null)}
       />
@@ -129,6 +130,7 @@ export const App: React.FC = () => {
       <ServiceTokenModal
         key={selectedTokenService ?? 'none'}
         serviceName={selectedTokenService}
+        mcpPath={services.find((s) => s.name === selectedTokenService)?.interface?.path}
         onClose={() => setSelectedTokenService(null)}
       />
 

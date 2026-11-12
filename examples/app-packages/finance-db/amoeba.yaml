@@ -45,3 +45,10 @@ schema:
       description: PostgreSQL connection string. Only this service receives it.
       required: true
       validation_pattern: "^postgres(ql)?://"
+interface:
+  type: mcp
+  path: /mcp
+  summary: "MCP tools at /mcp, plus REST: GET /tables/customers, POST /queries/overdue-loans with {\"branch\": \"JKT-01\"}. Columns are masked per role."
+  try:
+    method: GET
+    path: /tables/customers

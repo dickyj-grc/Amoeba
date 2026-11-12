@@ -12,8 +12,8 @@ permissions:
   # MCP's Streamable HTTP transport uses POST for every call (initialize,
   # tools/list, tools/call, ...), which Amoeba classifies as the "add"
   # operation -- read-only wouldn't be enough to call any MCP method at all.
-  read: [admin, analyst]
-  add: [admin, analyst]
+  read: [admin, analyst, mcp:obscura]
+  add: [admin, analyst, mcp:obscura]
 # Obscura 0.2.3+ refuses to serve MCP over HTTP without a bearer token. The
 # installer supplies one secret; the container gets it as OBSCURA_MCP_TOKEN
 # and Amoeba sends it as `Authorization: Bearer ...` on every proxied call.
@@ -29,3 +29,14 @@ schema:
       required: true
       validation_pattern: "^.{32,}$"
       inject: env
+interface:
+  type: mcp
+  path: /mcp
+  summary: MCP over HTTP at /mcp. Amoeba adds Obscura's own token; callers use their Amoeba token.
+  try:
+    method: POST
+    path: /mcp
+    body:
+      jsonrpc: "2.0"
+      id: 1
+      method: tools/list

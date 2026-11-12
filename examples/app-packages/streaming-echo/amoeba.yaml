@@ -15,3 +15,10 @@ schema:
     MESSAGE:
       type: string
       default: "hello from stream"
+interface:
+  type: http
+  path: /
+  summary: GET / returns the message; GET /stream sends five server-sent events.
+  try:
+    method: GET
+    path: /stream

@@ -5,8 +5,9 @@ use amoeba::auth::jwt::{local_engine, local_engine_with_revocation};
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::auth::revocation::RevocationStore;
 use amoeba::routing::apps_admin::{
-    build_app_image, build_status, cancel_build, install_app, issue_service_token, list_apps,
-    list_service_tokens, revoke_service_token, uninstall_app, update_app_policy,
+    build_app_image, build_status, cancel_build, get_library_entry, install_app,
+    install_from_library, issue_service_token, list_apps, list_library, list_service_tokens,
+    revoke_service_token, uninstall_app, update_app_policy,
 };
 use amoeba::state::AppState;
 use axum::{
@@ -86,6 +87,9 @@ fn build_app_with(catalog_path: &str, revocation: Option<RevocationStore>) -> Ro
             "/apps/:name/build",
             post(build_app_image).get(build_status).delete(cancel_build),
         )
+        .route("/library", get(list_library))
+        .route("/library/:id", get(get_library_entry))
+        .route("/library/:id/install", post(install_from_library))
         .route("/apps/:name/token", post(issue_service_token))
         .route("/apps/:name/tokens", get(list_service_tokens))
         .route("/apps/:name/tokens/:jti", delete(revoke_service_token))
@@ -477,6 +481,71 @@ async fn build_status_reports_the_latest_build_and_cancel_needs_a_running_one() 
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// @lat: [[deploy#App library#Install from the library]]
+#[tokio::test]
+async fn library_apps_are_listed_and_install_with_their_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("services.json");
+    let catalog = catalog.to_str().unwrap();
+    let app = build_app(catalog);
+
+    let res = app
+        .clone()
+        .oneshot(admin_json("GET", "/admin/library", ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let list = json_body(res).await;
+    let lightpanda = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "lightpanda-mcp")
+        .expect("lightpanda-mcp is in the library");
+    assert_eq!(lightpanda["interface"]["type"], "mcp");
+    assert_eq!(lightpanda["images"][0], "lightpanda/browser");
+    assert_eq!(lightpanda["port"], 9222);
+
+    let res = app
+        .clone()
+        .oneshot(admin_json(
+            "POST",
+            "/admin/library/lightpanda-mcp/install",
+            r#"{"name":"browser"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(catalog).unwrap()).unwrap();
+    let svc = &saved["services"]["browser"];
+    assert_eq!(svc["container"]["image"], "lightpanda/browser:latest");
+    assert_eq!(svc["container"]["command"][1], "mcp");
+    assert_eq!(svc["local_upstream"], true);
+    assert_eq!(svc["interface"]["path"], "/mcp");
+    assert_eq!(svc["permissions"]["add"][1], "mcp:browser");
+
+    let res = app
+        .clone()
+        .oneshot(admin_json(
+            "POST",
+            "/admin/library/no-such-app/install",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .oneshot(admin_json(
+            "POST",
+            "/admin/library/lightpanda-mcp/install",
+            r#"{"name":"Bad Name"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

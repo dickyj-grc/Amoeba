@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### App library
+
+- **Deploy known apps without knowing their setup.** The deploy dialog opens on a new **App library** tab: search by name, tag, image (`lightpanda/browser:latest`) or GitHub URL, pick an app, and fill only the settings it needs. Image, start command, port, permissions and API come from the library. Typing a known image or repo in the Docker Image or Git tab offers the library setup.
+- **First apps:** Lightpanda over MCP (no build: the published image in its MCP mode), Obscura, the database service, hello-world and streaming-echo.
+- **API:** `GET /admin/library`, `GET /admin/library/<id>`, `POST /admin/library/<id>/install` with `{name?, public?, env, secrets}`. The library is compiled into the gateway.
+
+### Manifest
+
+- **`app.command`** replaces an image's `CMD`, so a published image can run in another mode without a build. Supported by the Docker and Apple container drivers. Write `${PORT}` for the port: it becomes `placement.port`, so the number is written once. Image apps also get a `PORT` env var.
+- **`interface`** says how callers use an app: `type` (`mcp`, `openapi`, `http`, `cdp`), `path`, `summary`, `docs` and a sample `try` request. The console shows it in the services table, starts the Test dialog with the sample request, and uses its path in the token dialog's MCP config.
+- **Required settings.** `schema.env` fields take `required`, and installs now check `type` (`string`, `number`, `integer`, `boolean`) and `options`. An empty value falls back to the default. The library tab shows `options` as a dropdown and marks required settings.
+- **Reference docs:** [`docs/manifest.md`](docs/manifest.md) documents every field, with [`docs/amoeba.schema.json`](docs/amoeba.schema.json) for editors and AI tools, linked from the README and listed in `llms.txt`.
+
 ### Console
 
 - **Build progress.** Deploying from Git or a Dockerfile now shows elapsed time, the command running and the live build log, updated every 2 seconds, with a "Stop build" button. Before, the button just said "Building image..." until the build ended.
@@ -10,6 +23,7 @@
 
 ### Gateway
 
+- **Reinstalls run the new spec.** Reinstalling an app under the same name used to restart its old container, so a changed image, command, env or memory limit had no effect (deploying Lightpanda from the library after the Docker Image tab still ran the CDP server, and `/mcp` returned 404). Containers are now labelled with a fingerprint of their spec and recreated when it changes.
 - **`GET` and `DELETE /admin/apps/<name>/build`** report and cancel the latest build. A second build for the same name while one runs is `409`. Cancelling kills the build's whole process group.
 - **`AMOEBA_BUILD_TIMEOUT_SECS`** overrides the 15-minute build timeout, for large projects.
 - **`GET /admin/apps`** returns names sorted.

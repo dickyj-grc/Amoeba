@@ -24,6 +24,26 @@ fn secrets_dir() -> String {
     std::env::var("AMOEBA_SECRETS_DIR").unwrap_or_else(|_| "/etc/amoeba/secrets".to_string())
 }
 
+/// Container label holding [`spec_fingerprint`] of what the container was
+/// created with. A container whose label differs (or is missing) was made
+/// from an older spec, e.g. before a reinstall changed its image, command or
+/// env, so drivers recreate it instead of restarting it.
+pub(super) const SPEC_LABEL: &str = "amoeba.spec";
+
+/// A stable hash (FNV-1a, 64-bit) of a container's creation settings. Stable
+/// across builds and Rust versions, unlike `DefaultHasher`.
+pub(super) fn spec_fingerprint<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        // A separator keeps ["ab", "c"] apart from ["a", "bc"].
+        for byte in part.bytes().chain([0]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 /// Reads each `env_from_secret` reference from disk (`<secrets_dir>/<value>`,
 /// trimmed) at call time. Deliberately not cached: values are resolved fresh
 /// on every `ensure_started`, and are never written back into a generated
@@ -247,6 +267,7 @@ fn build_container_driver(
             cpu_cores,
             container.env.clone(),
             svc.env_from_secret.clone(),
+            container.command.clone(),
         ));
     }
 
@@ -259,6 +280,7 @@ fn build_container_driver(
         container.runtime.clone(),
         container.env.clone(),
         svc.env_from_secret.clone(),
+        container.command.clone(),
     ))
 }
 

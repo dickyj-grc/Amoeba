@@ -61,7 +61,7 @@ This covers an unset or empty env var, a missing or empty `token_secret` file, a
 
 ## Service status
 
-`GET /admin/apps/<name>` reports the install lifecycle (`installed`, `pulling`, `ready`, `error` with a message) and a `runtime` block: `running`, `active_requests`, `last_request_at`, `port`, `public`.
+`GET /admin/apps/<name>` reports the install lifecycle (`installed`, `pulling`, `ready`, `error` with a message), a `runtime` block (`running`, `active_requests`, `last_request_at`, `port`, `public`) and the package's `interface`.
 
 [[src/routing/apps_admin.rs#app_status]] builds it. The console's table maps it with [[web/src/lib/services.ts#toServiceItem]] to Running, Preparing, Idle or Error, and shows the error message and port.
 

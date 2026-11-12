@@ -9,6 +9,7 @@
 
 pub mod build;
 pub mod deploy;
+pub mod library;
 pub mod manager;
 pub mod schema;
 pub mod state;

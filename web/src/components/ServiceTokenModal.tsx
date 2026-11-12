@@ -13,6 +13,8 @@ import {
 
 interface ServiceTokenModalProps {
   serviceName: string | null;
+  /** The app's MCP path from its package; `/mcp` when it declares none. */
+  mcpPath?: string;
   onClose: () => void;
 }
 
@@ -20,6 +22,7 @@ const nowSecs = () => Math.floor(Date.now() / 1000);
 
 export const ServiceTokenModal: React.FC<ServiceTokenModalProps> = ({
   serviceName,
+  mcpPath: declaredMcpPath,
   onClose,
 }) => {
   const [label, setLabel] = useState('');
@@ -29,7 +32,7 @@ export const ServiceTokenModal: React.FC<ServiceTokenModalProps> = ({
   const [tokenResult, setTokenResult] = useState<ServiceTokenResponse | null>(null);
   const [issued, setIssued] = useState<IssuedToken[]>([]);
   const [copied, setCopied] = useState<'token' | 'config' | null>(null);
-  const [mcpPath, setMcpPath] = useState('/mcp');
+  const [mcpPath, setMcpPath] = useState(declaredMcpPath ?? '/mcp');
   const [error, setError] = useState<string | null>(null);
 
   const loadIssued = useCallback(async () => {

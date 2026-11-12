@@ -329,6 +329,7 @@ mod tests {
             env_from_secret: HashMap::new(),
             header_from_secret: HashMap::new(),
             local_upstream: false,
+            interface: None,
         }
     }
 

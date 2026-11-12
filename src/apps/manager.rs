@@ -6,6 +6,7 @@
 
 use super::schema::{
     AppManifest, AppSpec, InstallValues, PolicyGrant, PolicyPatch, ResourceSpec, SecretInject,
+    expand_command,
 };
 use super::state::LifecycleStatus;
 use crate::config::schema::{
@@ -169,9 +170,9 @@ impl AppManager {
             let dst = stack_dir.join("compose.yaml");
             fs::copy(&src, &dst)?;
 
-            if !values.env.is_empty() {
-                let dotenv = values
-                    .env
+            let env = resolved_env(&manifest, &values);
+            if !env.is_empty() {
+                let dotenv = env
                     .iter()
                     .map(|(k, v)| format!("{k}={v}\n"))
                     .collect::<String>();
@@ -313,7 +314,7 @@ fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), AppManagerError> {
     Ok(())
 }
 
-fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
+pub(crate) fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
     if manifest.api_version != "v1" {
         return Err(AppManagerError::Validation(format!(
             "unsupported api_version: {}",
@@ -327,9 +328,35 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
         ));
     }
 
+    if let Some(interface) = &manifest.interface {
+        interface.validate().map_err(AppManagerError::Validation)?;
+    }
+    if let AppSpec::Image { command, .. } = &manifest.app
+        && command.iter().any(|a| a.is_empty() || a.contains('\0'))
+    {
+        return Err(AppManagerError::Validation(
+            "app.command entries must be non-empty".into(),
+        ));
+    }
+
     if manifest.placement.port == 0 {
         return Err(AppManagerError::Validation(
             "placement.port is required".to_string(),
+        ));
+    }
+    manifest
+        .start_command()
+        .map_err(AppManagerError::Validation)?;
+    // Image apps get PORT = placement.port; letting the installer set it too
+    // would point the app at a port the gateway does not probe.
+    let port_secret = manifest
+        .schema
+        .secrets
+        .get("PORT")
+        .is_some_and(|s| s.inject == SecretInject::Env);
+    if !manifest.is_compose() && (manifest.schema.env.contains_key("PORT") || port_secret) {
+        return Err(AppManagerError::Validation(
+            "schema must not declare PORT: it is set from placement.port".into(),
         ));
     }
 
@@ -347,6 +374,25 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManagerError> {
         return Err(AppManagerError::Validation(
             "tenant_permissions replaces permissions; omit permissions".into(),
         ));
+    }
+
+    for (key, field) in &manifest.schema.env {
+        if !crate::apps::schema::ENV_TYPES.contains(&field.r#type.as_str()) {
+            return Err(AppManagerError::Validation(format!(
+                "env {key}: unknown type '{}' (use string, number, integer or boolean)",
+                field.r#type
+            )));
+        }
+        if field.options.as_ref().is_some_and(|o| o.is_empty()) {
+            return Err(AppManagerError::Validation(format!(
+                "env {key}: options must not be empty"
+            )));
+        }
+        if let Some(default) = &field.default {
+            field
+                .check(default)
+                .map_err(|e| AppManagerError::Validation(format!("env {key}: default {e}")))?;
+        }
     }
 
     // Secret keys become file names under the secrets directory and header
@@ -433,6 +479,21 @@ fn validate_values(manifest: &AppManifest, values: &InstallValues) -> Result<(),
             return Err(AppManagerError::Validation(format!(
                 "unexpected env value: {key}"
             )));
+        }
+    }
+
+    // An empty value counts as not given, so the default still applies.
+    for (key, field) in &manifest.schema.env {
+        match values.env.get(key).filter(|v| !v.is_empty()) {
+            Some(value) => field
+                .check(value)
+                .map_err(|e| AppManagerError::Validation(format!("env {key} {e}")))?,
+            None if field.required && field.fallback().is_none() => {
+                return Err(AppManagerError::Validation(format!(
+                    "missing required env value: {key}"
+                )));
+            }
+            None => {}
         }
     }
 
@@ -566,6 +627,25 @@ fn upsert_machine(catalog: &mut ServiceCatalog) {
     }
 }
 
+/// Install values with declared defaults filled in. An empty value counts as
+/// not given, as in [`validate_values`].
+fn resolved_env(manifest: &AppManifest, values: &InstallValues) -> HashMap<String, String> {
+    manifest
+        .schema
+        .env
+        .iter()
+        .filter_map(|(key, field)| {
+            let value = values
+                .env
+                .get(key)
+                .map(String::as_str)
+                .filter(|v| !v.is_empty())
+                .or(field.fallback())?;
+            Some((key.clone(), value.to_string()))
+        })
+        .collect()
+}
+
 fn build_service_config(
     manifest: &AppManifest,
     values: &InstallValues,
@@ -610,16 +690,9 @@ fn build_service_config(
     }
 
     let container = match &manifest.app {
-        AppSpec::Image { image } => {
-            let mut env = values.env.clone();
-            // Apply declared defaults for env vars not supplied by the user.
-            for (key, field) in &manifest.schema.env {
-                if !env.contains_key(key) {
-                    if let Some(default) = &field.default {
-                        env.insert(key.clone(), default.clone());
-                    }
-                }
-            }
+        AppSpec::Image { image, command } => {
+            let mut env = resolved_env(manifest, values);
+            env.insert("PORT".into(), manifest.placement.port.to_string());
 
             Some(ContainerSpec {
                 image: image.clone(),
@@ -629,6 +702,8 @@ fn build_service_config(
                     .as_ref()
                     .map(resource_spec_to_container_resources),
                 env,
+                // Validated by validate_manifest.
+                command: expand_command(command, manifest.placement.port).unwrap_or_default(),
             })
         }
         AppSpec::Compose { .. } => None,
@@ -643,17 +718,7 @@ fn build_service_config(
                 compose_file: Some(compose_path.to_string_lossy().to_string()),
                 project_name: Some(manifest.service_name().to_string()),
                 compose_version: Some("3.8".to_string()),
-                env_vars: {
-                    let mut env = values.env.clone();
-                    for (key, field) in &manifest.schema.env {
-                        if !env.contains_key(key) {
-                            if let Some(default) = &field.default {
-                                env.insert(key.clone(), default.clone());
-                            }
-                        }
-                    }
-                    env
-                },
+                env_vars: resolved_env(manifest, values),
                 services: None,
                 networks: HashMap::new(),
             })
@@ -680,6 +745,7 @@ fn build_service_config(
         env_from_secret,
         header_from_secret,
         local_upstream: manifest.local_upstream,
+        interface: manifest.interface.clone(),
     }
 }
 
@@ -1277,6 +1343,79 @@ schema:
         assert!(matches!(result, Err(AppManagerError::Validation(_))));
     }
 
+    // @lat: [[deploy#App library#Declared settings]]
+    #[tokio::test]
+    async fn declared_env_settings_are_enforced() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let manifest = format!(
+            "{}  env:\n    REGION:\n      required: true\n    LOG_LEVEL:\n      default: info\n      options: [debug, info]\n    WORKERS:\n      type: integer\n      required: true\n      default: \"2\"\n",
+            image_manifest()
+        );
+        let package = package_zip_with_manifest(&manifest);
+        let install = |env: &[(&str, &str)]| {
+            let values = InstallValues {
+                env: env
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+            };
+            manager.install(&package, values)
+        };
+        let message = |r: Result<_, AppManagerError>| match r {
+            Err(AppManagerError::Validation(m)) => m,
+            other => panic!("expected a validation error, got {other:?}"),
+        };
+
+        // Required without a default; an empty value counts as missing.
+        assert!(message(install(&[]).await).contains("missing required env value: REGION"));
+        assert!(message(install(&[("REGION", "")]).await).contains("REGION"));
+        // Values must match options and type.
+        assert!(
+            message(install(&[("REGION", "eu"), ("LOG_LEVEL", "loud")]).await)
+                .contains("must be one of: debug, info")
+        );
+        assert!(
+            message(install(&[("REGION", "eu"), ("WORKERS", "two")]).await)
+                .contains("must be an integer")
+        );
+
+        // A required setting with a default may be left empty; defaults fill in.
+        install(&[("REGION", "eu"), ("LOG_LEVEL", "")])
+            .await
+            .unwrap();
+        let catalog = load_catalog(&catalog_path).unwrap();
+        let env = &catalog.services["test-image"]
+            .container
+            .as_ref()
+            .unwrap()
+            .env;
+        assert_eq!(env.get("REGION").map(String::as_str), Some("eu"));
+        assert_eq!(env.get("LOG_LEVEL").map(String::as_str), Some("info"));
+        assert_eq!(env.get("WORKERS").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn env_declarations_are_checked_at_install() {
+        let bad = |env: &str| {
+            let manifest: AppManifest =
+                serde_yaml::from_str(&format!("{}  env:\n{env}", image_manifest())).unwrap();
+            validate_manifest(&manifest).unwrap_err().to_string()
+        };
+        assert!(bad("    A:\n      type: date\n").contains("unknown type 'date'"));
+        assert!(bad("    A:\n      options: []\n").contains("options must not be empty"));
+        assert!(
+            bad("    A:\n      default: x\n      options: [y]\n")
+                .contains("default must be one of")
+        );
+        assert!(
+            bad("    A:\n      type: boolean\n      default: \"yes\"\n")
+                .contains("default must be true or false")
+        );
+    }
+
     // @lat: [[gateway#Operation resolution#From an app package]]
     #[tokio::test]
     async fn operation_rules_from_the_manifest_reach_the_catalog() {
@@ -1362,6 +1501,72 @@ schema:
             "Cmd": ["node", "server.js", "--port=3000"],
         });
         assert_eq!(ports_from_image_config(&exposed), [3000]);
+    }
+
+    #[tokio::test]
+    async fn start_command_and_interface_reach_the_catalog() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let values = || InstallValues {
+            secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+            ..Default::default()
+        };
+        let manifest = image_manifest().replace(
+            "  image: hello-world:latest\n",
+            "  image: hello-world:latest\n  command: [/bin/app, mcp, \"--port=${PORT}\"]\n",
+        ) + "interface:\n  type: mcp\n  path: /mcp\n  try:\n    method: POST\n    path: /mcp\n    body: {jsonrpc: \"2.0\", id: 1, method: tools/list}\n";
+        manager
+            .install(&package_zip_with_manifest(&manifest), values())
+            .await
+            .unwrap();
+        let catalog = load_catalog(&catalog_path).unwrap();
+        let svc = &catalog.services["test-image"];
+        assert_eq!(
+            svc.container.as_ref().unwrap().command,
+            ["/bin/app", "mcp", "--port=8080"]
+        );
+        assert_eq!(svc.container.as_ref().unwrap().env["PORT"], "8080");
+        let manager = &manager;
+        let rejected = |manifest: String| async move {
+            match manager
+                .install(&package_zip_with_manifest(&manifest), values())
+                .await
+            {
+                Err(AppManagerError::Validation(m)) => m,
+                other => panic!("expected a validation error, got {other:?}"),
+            }
+        };
+        assert!(
+            rejected(image_manifest().replace(
+                "  image: hello-world:latest\n",
+                "  image: hello-world:latest\n  command: [--port, \"${PROT}\"]\n",
+            ))
+            .await
+            .contains("only ${PORT} is supported")
+        );
+        assert!(
+            rejected(format!(
+                "{}  env:\n    PORT:\n      default: \"1\"\n",
+                image_manifest()
+            ))
+            .await
+            .contains("must not declare PORT")
+        );
+        let interface = svc.interface.as_ref().unwrap();
+        assert_eq!(interface.r#type, crate::config::schema::InterfaceType::Mcp);
+        assert_eq!(
+            interface.r#try.as_ref().unwrap().body.as_ref().unwrap()["method"],
+            "tools/list"
+        );
+
+        let bad = image_manifest().to_string() + "interface:\n  type: http\n  path: no-slash\n";
+        assert!(
+            manager
+                .install(&package_zip_with_manifest(&bad), values())
+                .await
+                .is_err()
+        );
     }
 
     // @lat: [[secrets#Gateway credential from a secret]]

@@ -5,10 +5,12 @@
 use crate::apps::build::{
     BuildProgress, BuildRequest, BuildState, BuildStatus, build_image, validate_image_name,
 };
+use crate::apps::library::{self, LibraryEntry};
 use crate::apps::manager::{AppManager, AppManagerError, spawn_readiness_probe};
 use crate::apps::schema::{InstallValues, PolicyPatch};
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
 use crate::auth::issued::{IssuedToken, now_secs};
+use crate::config::schema::AppInterface;
 use crate::routing::operation::scoped_role;
 use crate::state::AppState;
 use axum::{
@@ -67,14 +69,24 @@ pub async fn install_app(
         "missing 'package' field".to_string(),
     ))?;
 
-    let manager = app_manager(&state);
+    install_package(&state, &package_bytes, values).await
+}
+
+/// Installs a package zip, then reloads the catalog and starts the readiness
+/// probe. Shared by uploads and app library installs.
+async fn install_package(
+    state: &Arc<AppState>,
+    package: &[u8],
+    values: InstallValues,
+) -> Result<(StatusCode, Json<InstallResponse>), (StatusCode, String)> {
+    let manager = app_manager(state);
     let manifest = manager
-        .install(&package_bytes, values)
+        .install(package, values)
         .await
         .map_err(map_manager_error)?;
 
     let app_name = manifest.service_name().to_string();
-    reload_catalog(&state);
+    reload_catalog(state);
     let app_state = Arc::new(AppLifecycleState::installed());
     state.set_app_state(&app_name, app_state.clone());
     spawn_readiness_probe(state.clone(), app_name.clone());
@@ -88,6 +100,51 @@ pub async fn install_app(
             state: app_state.snapshot(),
         }),
     ))
+}
+
+/// Every app in the library, for the console's search.
+pub async fn list_library() -> Json<Vec<LibraryEntry>> {
+    Json(library::entries())
+}
+
+pub async fn get_library_entry(
+    Path(id): Path<String>,
+) -> Result<Json<LibraryEntry>, (StatusCode, String)> {
+    library::entry(&id).map(Json).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("no app '{id}' in the library"),
+    ))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LibraryInstallRequest {
+    /// Service name; defaults to the app's own.
+    pub name: Option<String>,
+    /// Overrides the app's `public` setting.
+    pub public: Option<bool>,
+    #[serde(default, flatten)]
+    pub values: InstallValues,
+}
+
+/// Installs a library app with the installer's name, public choice and
+/// values, exactly as if its package had been uploaded.
+pub async fn install_from_library(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<LibraryInstallRequest>,
+) -> Result<(StatusCode, Json<InstallResponse>), (StatusCode, String)> {
+    if let Some(name) = body.name.as_deref() {
+        validate_image_name(name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    let package = library::package_zip(&id, body.name.as_deref(), body.public).map_err(|e| {
+        let status = if e.starts_with("no app") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, e)
+    })?;
+    install_package(&state, &package, body.values).await
 }
 
 #[derive(Serialize)]
@@ -108,6 +165,9 @@ pub struct AppStatusResponse {
     pub name: String,
     pub state: AppLifecycleSnapshot,
     pub runtime: AppRuntimeStatus,
+    /// How to call the app, from its package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<AppInterface>,
 }
 
 /// What the gateway knows about the running workload.
@@ -166,6 +226,7 @@ fn app_status(state: &AppState, app_name: String) -> AppStatusResponse {
         name: app_name,
         state: snapshot,
         runtime,
+        interface: service.and_then(|s| s.interface),
     }
 }
 
