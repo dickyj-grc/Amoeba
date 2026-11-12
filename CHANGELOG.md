@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.5 — 2026-11-12
+
+### Upgrade notes
+
+- **Each app container is recreated once.** Containers now carry a spec label, and existing ones have none, so each image app's container is replaced on its next start. Anything an app kept only in its own container filesystem is lost then, as on a reinstall.
+- **Image apps get a `PORT` env var** set to `placement.port`. A manifest that declares `PORT` in `schema` is refused; remove it and use `${PORT}` in `app.command` if the app takes the port as an argument.
+- **Stricter `schema.env`.** Installs refuse an unknown `type`, empty `options`, or a `default` that fails its own `type` or `options`.
 
 ### App library
 
