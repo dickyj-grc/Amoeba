@@ -2,7 +2,9 @@
 //! Packages. These routes are gated by the same admin role middleware as
 //! `/admin/users`.
 
-use crate::apps::build::{BuildRequest, build_image, validate_image_name};
+use crate::apps::build::{
+    BuildProgress, BuildRequest, BuildState, BuildStatus, build_image, validate_image_name,
+};
 use crate::apps::manager::{AppManager, AppManagerError, spawn_readiness_probe};
 use crate::apps::schema::{InstallValues, PolicyPatch};
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
@@ -345,27 +347,62 @@ pub struct BuildErrorResponse {
     pub log: Vec<String>,
 }
 
+/// Marks a build cancelled when the request running it goes away early (the
+/// client disconnected), so the status endpoint does not report it running
+/// forever. Dropping the build future also kills its command.
+struct FinishOnDrop(Arc<BuildProgress>);
+
+impl Drop for FinishOnDrop {
+    fn drop(&mut self) {
+        self.0.finish(BuildState::Cancelled);
+    }
+}
+
 /// Builds an image for `name` from a Git repository or a Dockerfile and
 /// returns its tag, which the caller then installs as an image app. Bad input
-/// is 400; a failed clone or build is 422 with the build log.
+/// is 400; a build already running for `name` is 409; a failed clone or build
+/// is 422 with the build log. Progress is visible meanwhile through
+/// [`build_status`].
 pub async fn build_app_image(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(request): Json<BuildRequest>,
 ) -> Result<Json<BuildResponse>, (StatusCode, Json<BuildErrorResponse>)> {
-    let bad_request = |error: String| {
+    let reject = |status: StatusCode, error: String| {
         (
-            StatusCode::BAD_REQUEST,
+            status,
             Json(BuildErrorResponse {
                 error,
                 log: Vec::new(),
             }),
         )
     };
-    validate_image_name(&name).map_err(bad_request)?;
-    request.validate().map_err(bad_request)?;
+    validate_image_name(&name).map_err(|e| reject(StatusCode::BAD_REQUEST, e))?;
+    request
+        .validate()
+        .map_err(|e| reject(StatusCode::BAD_REQUEST, e))?;
+
+    let progress = BuildProgress::new();
+    {
+        let mut builds = state.builds.lock().unwrap_or_else(|e| e.into_inner());
+        if builds.get(&name).is_some_and(|b| b.is_running()) {
+            return Err(reject(
+                StatusCode::CONFLICT,
+                format!("a build for '{name}' is already running"),
+            ));
+        }
+        builds.insert(name.clone(), progress.clone());
+    }
+    let _finish = FinishOnDrop(progress.clone());
 
     let registry = std::env::var("AMOEBA_REGISTRY").ok();
-    match build_image(&name, &request, registry.as_deref()).await {
+    let result = build_image(&name, &request, registry.as_deref(), &progress).await;
+    progress.finish(match &result {
+        Ok(_) => BuildState::Succeeded,
+        Err(_) if progress.is_cancelled() => BuildState::Cancelled,
+        Err(_) => BuildState::Failed,
+    });
+    match result {
         Ok(outcome) => Ok(Json(BuildResponse {
             image: outcome.image,
             log: outcome.log,
@@ -376,6 +413,42 @@ pub async fn build_app_image(
                 error: failure.message,
                 log: failure.log,
             }),
+        )),
+    }
+}
+
+/// Log lines returned by [`build_status`]; the console shows the tail.
+const STATUS_LOG_LINES: usize = 200;
+
+/// The latest build for `name`: running or finished, elapsed time, the
+/// command running and the newest log lines. 404 when there has been none
+/// since the gateway started.
+pub async fn build_status(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<BuildStatus>, (StatusCode, String)> {
+    let builds = state.builds.lock().unwrap_or_else(|e| e.into_inner());
+    builds
+        .get(&name)
+        .map(|b| Json(b.status(STATUS_LOG_LINES)))
+        .ok_or((StatusCode::NOT_FOUND, format!("no build for '{name}'")))
+}
+
+/// Cancels the running build for `name`; its command is killed and the
+/// build request answers 422 "cancelled". 404 when none is running.
+pub async fn cancel_build(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let builds = state.builds.lock().unwrap_or_else(|e| e.into_inner());
+    match builds.get(&name) {
+        Some(build) if build.is_running() => {
+            build.cancel();
+            Ok(StatusCode::ACCEPTED)
+        }
+        _ => Err((
+            StatusCode::NOT_FOUND,
+            format!("no running build for '{name}'"),
         )),
     }
 }

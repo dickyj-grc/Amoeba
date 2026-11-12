@@ -226,3 +226,48 @@ export class BuildError extends Error {
     this.name = 'BuildError';
   }
 }
+
+/** The latest build for a service, as `GET /admin/apps/<name>/build` reports it. */
+export interface BuildStatus {
+  state: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  step: string;
+  elapsed_seconds: number;
+  log: string[];
+}
+
+/** Reads build progress; null when there is none yet or the request fails. */
+export async function fetchBuildStatus(
+  name: string,
+  token: string | null,
+  fetchFn: typeof fetch = fetch,
+): Promise<BuildStatus | null> {
+  try {
+    const res = await fetchFn(`/admin/apps/${encodeURIComponent(name)}/build`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.ok ? ((await res.json()) as BuildStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Stops the running build; the pending build request then fails as cancelled. */
+export async function cancelBuild(
+  name: string,
+  token: string | null,
+  fetchFn: typeof fetch = fetch,
+): Promise<void> {
+  await fetchFn(`/admin/apps/${encodeURIComponent(name)}/build`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** `42s`, `3m 05s`, `1h 02m`. */
+export function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}

@@ -1,5 +1,6 @@
 //! Shared application state: config catalog, runtime tracking, auth engine.
 
+use crate::apps::build::BuildProgress;
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
 use crate::auth::JwtEngine;
 use crate::auth::issued::IssuedTokenStore;
@@ -30,6 +31,8 @@ pub struct AppState {
     /// Metadata of service tokens issued by the console, kept next to the
     /// catalog as `issued_tokens.json`.
     pub issued_tokens: IssuedTokenStore,
+    /// The latest source build per app name, for progress and cancel.
+    pub builds: std::sync::Mutex<HashMap<String, Arc<BuildProgress>>>,
     pub http_client: reqwest::Client,
     pub users_file: String,
     pub catalog_path: String,
@@ -96,6 +99,7 @@ impl AppState {
             jwt_engine,
             revocation_store,
             issued_tokens: IssuedTokenStore::persistent(config_dir.join("issued_tokens.json")),
+            builds: std::sync::Mutex::new(HashMap::new()),
             http_client,
             users_file: users_file.to_string(),
             catalog_path: config_path.to_string(),

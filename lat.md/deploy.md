@@ -13,9 +13,21 @@ The console's Git and Dockerfile tabs have no image yet, so Amoeba builds one on
 - `{"source":"git","url","ref"?}`: shallow-clone the repo and build with its root `Dockerfile`, or with nixpacks when there is none and nixpacks is installed ([[src/apps/build.rs#choose_builder]]).
 - `{"source":"dockerfile","dockerfile","context_url"?,"context_ref"?}`: build the pasted Dockerfile. If `context_url` is set, the repo is cloned as the build context and the pasted file replaces its Dockerfile.
 
-The tag comes from [[src/apps/deploy.rs#image_reference]]: `amoeba/<name>:latest`, or `<AMOEBA_REGISTRY>/<name>:latest` with a push when that variable is set. Each build runs in a fresh temp directory. Clone times out after 2 minutes, build after 15. The request blocks until the build finishes.
+The tag comes from [[src/apps/deploy.rs#image_reference]]: `amoeba/<name>:latest`, or `<AMOEBA_REGISTRY>/<name>:latest` with a push when that variable is set. Each build runs in a fresh temp directory. Clone times out after 2 minutes, build after 15 ([[src/apps/build.rs#build_timeout]]: `AMOEBA_BUILD_TIMEOUT_SECS` overrides it, for large projects). The request blocks until the build finishes; [[deploy#Source builds#Live progress]] shows what it is doing meanwhile.
 
 The MCP server's `deploy_service` tool has its own build code in `src/bin/amoeba-mcp.rs`; it does not call this endpoint.
+
+### Live progress
+
+A build can take many minutes, so its output is visible while it runs, and it can be stopped.
+
+[[src/apps/build.rs#BuildProgress]] collects each command's output line by line as it arrives (BuildKit in plain mode), keeping the last 500 lines. The gateway keeps the latest build per app name in memory.
+
+- `GET /admin/apps/<name>/build` ([[src/routing/apps_admin.rs#build_status]]): `{state, step, elapsed_seconds, log}`, where `state` is `running`, `succeeded`, `failed` or `cancelled`, and `log` is the newest 200 lines. 404 when there has been no build since the gateway started.
+- `DELETE /admin/apps/<name>/build` ([[src/routing/apps_admin.rs#cancel_build]]): stops the running build. Each command runs in its own process group and the whole group is killed, so `docker` helpers stop too. The pending build request answers 422 `cancelled`.
+- A second build for the same name while one runs is 409.
+
+The console's deploy dialog polls the status every 2 seconds ([[web/src/lib/deployPackage.ts#fetchBuildStatus]]) while its build request is pending, showing elapsed time, the current command, the log tail and a "Stop build" button.
 
 ### Input checks
 
@@ -49,3 +61,9 @@ The console's token dialog issues a scoped JWT (role `mcp:<service>`) for one se
 ### Registry
 
 [[src/auth/issued.rs#IssuedTokenStore]] records each issued token's `jti`, label, org, role and expiry in `issued_tokens.json` next to the catalog, never the token, so the file cannot be replayed. Expired entries are dropped on the next write.
+
+## Console refresh
+
+The service list refreshes every 3 seconds without visible churn: background refreshes do not show a loading state, and an unchanged result keeps the old list so nothing re-renders.
+
+The list is sorted by name on the server ([[src/apps/manager.rs#AppManager#list_installed]]) and in the console. The catalog is a map, so before sorting the rows changed order on every refresh. [[web/src/lib/services.ts#sameServices]] decides whether a refresh changed anything. Refreshes pause while the browser tab is hidden.

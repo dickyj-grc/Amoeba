@@ -251,9 +251,13 @@ impl AppManager {
     }
 
     /// Lists installed app names from the catalog (best-effort, read-only).
+    /// Installed app names, sorted. The catalog is a map, so without sorting
+    /// the order would change on every load and the console rows would jump.
     pub fn list_installed(&self) -> Result<Vec<String>, AppManagerError> {
         let catalog = load_catalog(&self.catalog_path)?;
-        Ok(catalog.services.keys().cloned().collect())
+        let mut names: Vec<String> = catalog.services.keys().cloned().collect();
+        names.sort();
+        Ok(names)
     }
 
     /// Reads one service from the catalog on disk.
