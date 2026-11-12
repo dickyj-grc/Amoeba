@@ -558,6 +558,7 @@ mod tests {
                 runtime: None,
                 resources: None,
                 env: HashMap::new(),
+                command: Vec::new(),
             }),
             stack_spec: None,
             operation_rules: None,
@@ -569,6 +570,7 @@ mod tests {
             env_from_secret: HashMap::new(),
             header_from_secret: HashMap::new(),
             local_upstream: false,
+            interface: None,
         }
     }
 

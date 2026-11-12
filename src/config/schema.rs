@@ -207,6 +207,74 @@ pub struct ContainerSpec {
     /// start time. Added by the app-package manager for single-image apps.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    /// Replaces the image's `CMD` (its entrypoint stays), like the arguments
+    /// after the image in `docker run`. Empty keeps the image's own command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+}
+
+/// How callers use a service, shown by the console after deploy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppInterface {
+    /// `mcp`, `openapi`, `http` or `cdp`.
+    pub r#type: InterfaceType,
+    /// Where the API lives under the service, e.g. `/mcp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// One or two sentences on how to call it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
+    /// A request the console's Test dialog starts with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#try: Option<TryRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceType {
+    /// Model Context Protocol over HTTP.
+    Mcp,
+    /// A REST API with an OpenAPI document.
+    Openapi,
+    /// Plain HTTP.
+    Http,
+    /// Chrome DevTools Protocol over WebSocket.
+    Cdp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TryRequest {
+    pub method: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+}
+
+impl AppInterface {
+    pub fn validate(&self) -> Result<(), String> {
+        for path in self.path.iter().chain(self.r#try.as_ref().map(|t| &t.path)) {
+            if !path.starts_with('/') {
+                return Err(format!("interface path '{path}' must start with '/'"));
+            }
+        }
+        if let Some(t) = &self.r#try
+            && !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&t.method.as_str())
+        {
+            return Err(format!(
+                "interface.try.method '{}' is not an HTTP method",
+                t.method
+            ));
+        }
+        if let Some(docs) = &self.docs
+            && !docs.starts_with("https://")
+            && !docs.starts_with("http://")
+        {
+            return Err("interface.docs must be an http(s) URL".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -343,6 +411,9 @@ pub struct ServiceConfig {
     /// callers, such as MCP servers guarding against DNS rebinding.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_upstream: bool,
+    /// How to call the service; from the app package, for the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<AppInterface>,
 }
 
 impl ServiceConfig {

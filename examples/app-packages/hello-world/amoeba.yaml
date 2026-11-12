@@ -26,3 +26,10 @@ schema:
       description: Greeting message shown by the app
       type: string
       default: Hello from Amoeba!
+interface:
+  type: http
+  path: /
+  summary: GET / returns the greeting text.
+  try:
+    method: GET
+    path: /

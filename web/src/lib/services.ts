@@ -26,5 +26,6 @@ export function toServiceItem(status: AppStatusResponse): ServiceItem {
       ...(lifecycle === 'error' && status.state.message ? { error: status.state.message } : {}),
     },
     ...(runtime ? { port: runtime.port, public: runtime.public } : {}),
+    ...(status.interface ? { interface: status.interface } : {}),
   };
 }

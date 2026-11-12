@@ -7,6 +7,8 @@
 **The self-hosted gateway between AI and your systems.** Amoeba lets agents use your internal systems without ever holding their secrets, and lets you deploy apps that Claude, ChatGPT, or Gemini built the moment they are ready. It is one Rust binary, and it needs no Kubernetes.
 
 > **New:** [amoeba-mcp](docs/mcp-server.md) — an MCP server that lets AI agents (Claude, ChatGPT, Gemini) deploy and manage microservices on Amoeba.
+>
+> **Describing an app for Amoeba?** See the [`amoeba.yaml` manifest reference](docs/manifest.md) and its [JSON Schema](docs/amoeba.schema.json).
 
 </td>
 </tr>
@@ -46,7 +48,7 @@ For databases, the [database service](#8-database-service) goes one step further
 Ask Claude, ChatGPT, or Gemini to build a small app, and it can be running on Amoeba a few minutes later, as a Docker container, behind a login, at its own path.
 
 - **From the AI itself:** with [amoeba-mcp](docs/mcp-server.md) connected, the assistant that wrote the app deploys it with one tool call (`deploy_service`), from a Dockerfile, a source tarball, or an image. It can then read the build and runtime logs and fix what broke.
-- **From the web console:** paste a Dockerfile, point at a Git repo, or enter an image. Amoeba builds the image on its own host and deploys it.
+- **From the web console:** pick a ready-made app from the **App library** (its image, start command, port and API come set up, with no build), or paste a Dockerfile, point at a Git repo, or enter an image. Amoeba builds the image on its own host when needed and deploys it.
 - **No platform work per app:** no DNS record, TLS certificate, reverse-proxy rule, or port to pick. The app is reachable at `/v1/<app>/`, sleeps when idle, and gets its secrets from Amoeba instead of from its code.
 
 ### Why they belong together
@@ -847,7 +849,9 @@ Revocations are persisted to `revocation_file` (default `/etc/amoeba/revoked_tok
 
 Amoeba supports a self-contained app package format so any open-source project can ship a deployable bundle. A package is a zip file containing an `amoeba.yaml` manifest and a standard `compose.yaml` (or image reference). Install and uninstall are token-gated admin API calls; Amoeba hot-reloads `services.json` without a restart.
 
-See `examples/app-packages/hello-world/` for a working example, `examples/app-packages/streaming-echo/` for an SSE streaming example, and `examples/app-packages/obscura/` for a headless-browser package.
+Every manifest field is documented in the [**`amoeba.yaml` manifest reference**](docs/manifest.md), with a [JSON Schema](docs/amoeba.schema.json) for editors and AI tools.
+
+See `examples/app-packages/hello-world/` for a working example, `examples/app-packages/streaming-echo/` for an SSE streaming example, `examples/app-packages/obscura/` for a headless-browser package, and `library/` for the apps in the console's App library.
 
 ### 7.1 Package structure
 

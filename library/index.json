@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "apps": [
+    {
+      "id": "lightpanda-mcp",
+      "title": "Lightpanda (MCP)",
+      "summary": "Headless browser for AI agents over MCP: open pages, read them as markdown, click, fill and extract.",
+      "tags": ["browser", "mcp", "scraping", "ai"],
+      "images": ["lightpanda/browser"],
+      "repos": ["github.com/lightpanda-io/browser"],
+      "package": "library/lightpanda-mcp"
+    },
+    {
+      "id": "obscura",
+      "title": "Obscura (MCP)",
+      "summary": "Headless browser MCP server for AI agents and web scraping.",
+      "tags": ["browser", "mcp", "scraping", "ai"],
+      "images": ["h4ckf0r0day/obscura"],
+      "repos": [],
+      "package": "examples/app-packages/obscura"
+    },
+    {
+      "id": "finance-db",
+      "title": "Database service (PostgreSQL)",
+      "summary": "Approved queries and table access to a PostgreSQL database, with per-role column masking, over REST and MCP.",
+      "tags": ["database", "postgres", "mcp", "sql"],
+      "images": ["ghcr.io/dickyj-grc/amoeba-db"],
+      "repos": ["github.com/dickyj-grc/amoeba"],
+      "package": "examples/app-packages/finance-db"
+    },
+    {
+      "id": "hello-world",
+      "title": "Hello world",
+      "summary": "A tiny web app that returns a greeting; good for a first deploy.",
+      "tags": ["example", "http"],
+      "images": ["hashicorp/http-echo"],
+      "repos": [],
+      "package": "examples/app-packages/hello-world"
+    },
+    {
+      "id": "streaming-echo",
+      "title": "Streaming echo",
+      "summary": "A small server-sent events stream, for testing streaming through the gateway.",
+      "tags": ["example", "sse", "http"],
+      "images": [],
+      "repos": [],
+      "package": "examples/app-packages/streaming-echo"
+    }
+  ]
+}

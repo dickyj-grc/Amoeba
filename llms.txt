@@ -1,0 +1,15 @@
+# Amoeba
+
+> Amoeba is a gateway that exposes internal systems to AI agents without exposing their secrets, and deploys AI-built apps as containers. Each app is described by an `amoeba.yaml` manifest.
+
+## Docs
+
+- [amoeba.yaml manifest reference](https://github.com/dickyj-grc/Amoeba/blob/main/docs/manifest.md): every field, validation rule and example for describing an app to Amoeba.
+- [amoeba.yaml JSON Schema](https://raw.githubusercontent.com/dickyj-grc/Amoeba/main/docs/amoeba.schema.json): the same rules, machine-readable.
+- [amoeba-mcp](https://github.com/dickyj-grc/Amoeba/blob/main/docs/mcp-server.md): MCP server for deploying and managing services on Amoeba.
+
+## Examples
+
+- [App library index](https://github.com/dickyj-grc/Amoeba/blob/main/library/index.json): ready-made apps and the images and repositories that find them.
+- [Lightpanda over MCP](https://github.com/dickyj-grc/Amoeba/blob/main/library/lightpanda-mcp/amoeba.yaml): a published image run in another mode with `app.command`.
+- [Example app packages](https://github.com/dickyj-grc/Amoeba/tree/main/examples/app-packages): compose and image apps, secrets, operation rules.

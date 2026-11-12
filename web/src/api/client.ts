@@ -2,6 +2,7 @@ import {
   AppsListResponse,
   AppStatusResponse,
   IssuedToken,
+  LibraryEntry,
   LoginResponse,
   ServiceItem,
   ServiceTokenResponse,
@@ -120,6 +121,26 @@ class AmoebaApiClient {
         org_id: options.orgId || undefined,
         ttl_seconds: options.ttlSeconds,
         label: options.label || undefined,
+      }),
+    });
+  }
+
+  public async listLibrary(): Promise<LibraryEntry[]> {
+    return this.request<LibraryEntry[]>('/admin/library');
+  }
+
+  /** Installs a library app; `name` and `public` override the app's own. */
+  public async installFromLibrary(
+    id: string,
+    options: { name?: string; public?: boolean; env?: Record<string, string>; secrets?: Record<string, string> },
+  ): Promise<void> {
+    await this.request(`/admin/library/${encodeURIComponent(id)}/install`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: options.name || undefined,
+        public: options.public,
+        env: options.env ?? {},
+        secrets: options.secrets ?? {},
       }),
     });
   }

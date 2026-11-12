@@ -1,0 +1,42 @@
+api_version: v1
+name: lightpanda
+version: 1.0.0
+description: Lightpanda headless browser for AI agents, over MCP. Opens pages and reads them as markdown or a semantic tree; clicks, fills forms and extracts data.
+author: Amoeba app library
+app:
+  type: image
+  image: lightpanda/browser:latest
+  # The image's own command starts the CDP server on 9222; this runs its MCP
+  # server instead, so no build is needed. ${PORT} is placement.port.
+  command: ["/bin/lightpanda", "mcp", "--host", "0.0.0.0", "--port", "${PORT}"]
+placement:
+  port: 9222
+  cooldown_seconds: 300
+# Lightpanda's MCP server refuses requests with a browser Origin or a
+# non-local Host, as DNS-rebinding defense. The gateway is the public
+# endpoint and checks the caller, so it calls Lightpanda as a local client.
+local_upstream: true
+# MCP's HTTP transport posts every call ("add"); GET opens its event stream
+# ("read"). mcp:lightpanda is the role on tokens issued from the console.
+permissions:
+  read: [admin, mcp:lightpanda]
+  add: [admin, mcp:lightpanda]
+  delete: [admin, mcp:lightpanda]
+resources:
+  memory: 1Gi
+interface:
+  type: mcp
+  path: /mcp
+  summary: MCP over HTTP at /mcp. Issue a token in the console and add the generated config to your AI app; tools include goto, markdown, tree, click, fill and extract.
+  docs: https://lightpanda.io/docs/open-source/guides/mcp-server
+  try:
+    method: POST
+    path: /mcp
+    body:
+      jsonrpc: "2.0"
+      id: 1
+      method: initialize
+      params:
+        protocolVersion: "2025-03-26"
+        capabilities: {}
+        clientInfo: {name: amoeba-console, version: "1"}

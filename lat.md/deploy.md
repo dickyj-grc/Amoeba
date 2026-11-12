@@ -67,3 +67,57 @@ The console's token dialog issues a scoped JWT (role `mcp:<service>`) for one se
 The service list refreshes every 3 seconds without visible churn: background refreshes do not show a loading state, and an unchanged result keeps the old list so nothing re-renders.
 
 The list is sorted by name on the server ([[src/apps/manager.rs#AppManager#list_installed]]) and in the console. The catalog is a map, so before sorting the rows changed order on every refresh. [[web/src/lib/services.ts#sameServices]] decides whether a refresh changed anything. Refreshes pause while the browser tab is hidden.
+
+## App library
+
+Ready-made app packages for known images, so a user deploys one without knowing its port, start command or API. The console's first deploy tab searches it.
+
+`library/index.json` lists each app's title, summary, tags, the image names and GitHub repos that find it, and its package folder. [[src/apps/library.rs]] compiles the index and every package's files into the gateway, so it works offline and ships with each release; the Dockerfile copies `library/` and `examples/app-packages/` for that.
+
+- `GET /admin/library` ([[src/routing/apps_admin.rs#list_library]]) lists entries with what the console needs: image, command, port, interface, and the env and secret inputs from the manifest's `schema`.
+- `GET /admin/library/<id>` returns one entry.
+- `POST /admin/library/<id>/install` ([[src/routing/apps_admin.rs#install_from_library]]) takes `{name?, public?, env, secrets}`.
+
+### Install from the library
+
+The install builds the package zip from the bundled files and installs it exactly like an upload, through the same readiness probe.
+
+[[src/apps/library.rs#package_zip]] applies the installer's name and `public` choice to the manifest. A rename also renames the console token role `mcp:<old>` in its permissions, so tokens issued for the new name work. Names follow the image-name rule (lowercase), as in the deploy form.
+
+### Start command
+
+`app.command` in a manifest replaces the image's `CMD` (the entrypoint stays), so a published image can run in another mode without a build, e.g. Lightpanda's MCP server instead of its CDP server.
+
+`${PORT}` in it becomes `placement.port` ([[src/apps/schema.rs#expand_command]]), so the port is written once; any other `${...}` fails the install. Image apps also get `PORT` in their env, so their `schema` must not declare it.
+
+It is stored, expanded, as `container.command` in the catalog. The Docker driver sets it as the container's `Cmd`; the Apple driver appends it after the image in `container run` ([[src/lifecycle/apple_container.rs#AppleContainerDriver#run_args]]).
+
+### Changed specs recreate the container
+
+Reinstalling an app (e.g. Lightpanda from the Docker Image tab, then from the library) must run the new spec, not restart the old container under the same name.
+
+Both drivers label each container `amoeba.spec` with a fingerprint ([[src/lifecycle/driver.rs#spec_fingerprint]]) of its image, command, env (secrets included), memory, CPU, runtime and network. On start, a container whose label differs or is missing is deleted and recreated. Anything kept only in the container's own filesystem is lost then, as it is on any reinstall.
+
+### Declared settings
+
+`schema.env` lists every setting an installer may set; install refuses undeclared keys, a missing `required` value without a default, and values that miss their `type` or `options`.
+
+Types are `string`, `number`, `integer` and `boolean` ([[src/apps/schema.rs#EnvField#check]]). An empty value counts as not given, so the default applies ([[src/apps/manager.rs#resolved_env]]); compose apps get the same values in their `.env`. Manifests are checked too: unknown types, empty `options` and defaults that fail their own rules are refused. The library tab shows `options` (and booleans) as a dropdown and marks required settings.
+
+### Bundled packages
+
+A test keeps the library honest: every index entry is bundled, its manifest validates, declares an `interface`, lists its image, and each bundled file equals the file on disk.
+
+Every folder under `library/` must be in the index. Example packages are reused from `examples/app-packages/` rather than copied.
+
+### Manifest reference
+
+`docs/manifest.md` documents every `amoeba.yaml` field for people and AI tools, with `docs/amoeba.schema.json` as its machine-readable form, linked from the README and listed in `llms.txt`.
+
+A test walks every bundled manifest against the schema and fails when a manifest uses a key the schema lacks, so new fields cannot ship undocumented. `docs/index.md` makes `docs/` ready to serve with GitHub Pages.
+
+### Console library tab
+
+The deploy dialog opens on "App library": search by name, tag, image (any tag or digest) or GitHub URL, pick an app, and fill only its declared inputs.
+
+[[web/src/lib/library.ts#searchLibrary]] ranks exact image or repo matches first; [[web/src/lib/library.ts#normalizeQuery]] strips schemes, `.git`, tags, digests and `docker.io/`. When an image or repo typed in the Docker Image or Git tab is a library app ([[web/src/lib/library.ts#libraryMatch]]), the tab offers its library setup. After deploy, the service's `interface` shows in the table, starts the Test dialog with its sample request, and sets the MCP path in the token dialog.

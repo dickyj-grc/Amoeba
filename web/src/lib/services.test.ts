@@ -24,6 +24,7 @@ describe('toServiceItem', () => {
       name: 'lightpanda',
       state: { state, message, updated_at: 0 },
       runtime: { running, active_requests: 2, last_request_at: null, port: 9222, public: true },
+      interface: { type: 'mcp', path: '/mcp' },
     }) as any;
 
   it('shows the real lifecycle and run state', () => {
@@ -34,5 +35,6 @@ describe('toServiceItem', () => {
     const failed = toServiceItem(status('error', null, 'nothing answered on port 8080'));
     expect(failed.state).toEqual({ phase: 'Error', active_requests: 2, error: 'nothing answered on port 8080' });
     expect(failed.port).toBe(9222);
+    expect(failed.interface).toEqual({ type: 'mcp', path: '/mcp' });
   });
 });
