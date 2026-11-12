@@ -5,8 +5,8 @@ use amoeba::auth::jwt::{local_engine, local_engine_with_revocation};
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::auth::revocation::RevocationStore;
 use amoeba::routing::apps_admin::{
-    build_app_image, install_app, issue_service_token, list_apps, list_service_tokens,
-    revoke_service_token, uninstall_app, update_app_policy,
+    build_app_image, build_status, cancel_build, install_app, issue_service_token, list_apps,
+    list_service_tokens, revoke_service_token, uninstall_app, update_app_policy,
 };
 use amoeba::state::AppState;
 use axum::{
@@ -82,7 +82,10 @@ fn build_app_with(catalog_path: &str, revocation: Option<RevocationStore>) -> Ro
             "/apps/:name",
             delete(uninstall_app).patch(update_app_policy),
         )
-        .route("/apps/:name/build", post(build_app_image))
+        .route(
+            "/apps/:name/build",
+            post(build_app_image).get(build_status).delete(cancel_build),
+        )
         .route("/apps/:name/token", post(issue_service_token))
         .route("/apps/:name/tokens", get(list_service_tokens))
         .route("/apps/:name/tokens/:jti", delete(revoke_service_token))
@@ -414,6 +417,63 @@ async fn service_tokens_can_be_long_lived_listed_and_revoked() {
     assert_eq!(json_body(res).await, serde_json::json!([]));
     let res = app()
         .oneshot(admin_json("DELETE", &revoke_uri, ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// @lat: [[deploy#Source builds#Live progress]]
+#[tokio::test]
+async fn build_status_reports_the_latest_build_and_cancel_needs_a_running_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("services.json");
+    let catalog = catalog.to_str().unwrap();
+    // One state for every request, as in the gateway, so builds are shared.
+    let app = build_app(catalog);
+
+    let res = app
+        .clone()
+        .oneshot(admin_json("GET", "/admin/apps/status-app/build", ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .clone()
+        .oneshot(admin_json("DELETE", "/admin/apps/status-app/build", ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Not a Dockerfile, so docker (or its absence) fails it fast.
+    let res = app
+        .clone()
+        .oneshot(admin_json(
+            "POST",
+            "/admin/apps/status-app/build",
+            r#"{"source":"dockerfile","dockerfile":"NOT A DOCKERFILE"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let res = app
+        .clone()
+        .oneshot(admin_json("GET", "/admin/apps/status-app/build", ""))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let status = json_body(res).await;
+    assert_eq!(status["state"], "failed");
+    assert!(status["step"].as_str().unwrap().starts_with("docker build"));
+    assert!(
+        status["log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap().starts_with("$ docker build"))
+    );
+    let res = app
+        .oneshot(admin_json("DELETE", "/admin/apps/status-app/build", ""))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);

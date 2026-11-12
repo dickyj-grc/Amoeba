@@ -2,17 +2,22 @@
 //! Dockerfile, for deploys that start from source (the web console's Git and
 //! Dockerfile tabs). The resulting tag is what the app package then runs.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Notify;
 
 use crate::apps::deploy::{image_reference, nixpacks_args};
 
 const CLONE_TIMEOUT: Duration = Duration::from_secs(120);
-const BUILD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_DOCKERFILE_BYTES: usize = 64 * 1024;
 /// Only the tail of a long build is returned; the error is almost always there.
 const MAX_LOG_LINES: usize = 500;
@@ -159,25 +164,148 @@ pub struct BuildFailure {
     pub log: Vec<String>,
 }
 
-/// Collects command output, keeping only the last `MAX_LOG_LINES` lines.
-#[derive(Default)]
-struct BuildLog(Vec<String>);
+/// What a build is doing, for the status endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildState {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
 
-impl BuildLog {
-    fn push(&mut self, line: impl Into<String>) {
-        self.0.push(line.into());
-        if self.0.len() > MAX_LOG_LINES {
-            let excess = self.0.len() - MAX_LOG_LINES;
-            self.0.drain(..excess);
+/// A snapshot of one build for `GET /admin/apps/<name>/build`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuildStatus {
+    pub state: BuildState,
+    /// The command currently running, e.g. `docker build -t amoeba/x:latest .`.
+    pub step: String,
+    pub elapsed_seconds: u64,
+    /// The newest log lines, oldest first.
+    pub log: Vec<String>,
+}
+
+struct ProgressInner {
+    log: VecDeque<String>,
+    step: String,
+    state: BuildState,
+    finished: Option<Instant>,
+}
+
+/// Live state of one build, shared between the request running it and the
+/// status endpoint the console polls. Command output is appended line by
+/// line as it arrives, keeping the last `MAX_LOG_LINES` lines.
+pub struct BuildProgress {
+    started: Instant,
+    inner: Mutex<ProgressInner>,
+    cancel_requested: AtomicBool,
+    cancel: Notify,
+}
+
+impl BuildProgress {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: Instant::now(),
+            inner: Mutex::new(ProgressInner {
+                log: VecDeque::new(),
+                step: String::new(),
+                state: BuildState::Running,
+                finished: None,
+            }),
+            cancel_requested: AtomicBool::new(false),
+            cancel: Notify::new(),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ProgressInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn push(&self, line: impl Into<String>) {
+        let mut inner = self.lock();
+        inner.log.push_back(line.into());
+        while inner.log.len() > MAX_LOG_LINES {
+            inner.log.pop_front();
         }
     }
 
-    fn fail(self, message: impl Into<String>) -> BuildFailure {
+    fn set_step(&self, step: String) {
+        self.push(format!("$ {step}"));
+        self.lock().step = step;
+    }
+
+    /// Records the final state; later calls are ignored.
+    pub fn finish(&self, state: BuildState) {
+        let mut inner = self.lock();
+        if inner.state == BuildState::Running {
+            inner.state = state;
+            inner.finished = Some(Instant::now());
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.lock().state == BuildState::Running
+    }
+
+    /// Asks the running command to stop; it is killed and the build fails
+    /// as cancelled.
+    pub fn cancel(&self) {
+        self.cancel_requested.store(true, Ordering::SeqCst);
+        self.cancel.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.cancel.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// The state plus at most the last `tail` log lines.
+    pub fn status(&self, tail: usize) -> BuildStatus {
+        let inner = self.lock();
+        let end = inner.finished.unwrap_or_else(Instant::now);
+        let skip = inner.log.len().saturating_sub(tail);
+        BuildStatus {
+            state: inner.state,
+            step: inner.step.clone(),
+            elapsed_seconds: end.duration_since(self.started).as_secs(),
+            log: inner.log.iter().skip(skip).cloned().collect(),
+        }
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.lock().log.iter().cloned().collect()
+    }
+
+    fn fail(&self, message: impl Into<String>) -> BuildFailure {
         BuildFailure {
             message: message.into(),
-            log: self.0,
+            log: self.log(),
         }
     }
+}
+
+/// Appends each line from `pipe` to the build log as it arrives.
+fn stream_lines(
+    pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    progress: Arc<BuildProgress>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(pipe).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            progress.push(line);
+        }
+    })
 }
 
 async fn run(
@@ -185,36 +313,96 @@ async fn run(
     args: &[String],
     cwd: &Path,
     timeout: Duration,
-    log: &mut BuildLog,
+    progress: &Arc<BuildProgress>,
 ) -> Result<(), String> {
-    log.push(format!("$ {program} {}", args.join(" ")));
-    let child = Command::new(program)
+    progress.set_step(format!("{program} {}", args.join(" ")));
+    let mut command = Command::new(program);
+    // Own process group, so a cancel or timeout can stop the children it
+    // starts too (docker's build helpers, a shell's commands).
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Line-by-line BuildKit output instead of a redrawn terminal view.
+        .env("BUILDKIT_PROGRESS", "plain")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(timeout, child)
-        .await
-        .map_err(|_| format!("{program} timed out after {}s", timeout.as_secs()))?
+        .spawn()
         .map_err(|e| format!("{program} failed to start: {e}"))?;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        log.push(line);
+    let readers = [
+        child
+            .stdout
+            .take()
+            .map(|p| stream_lines(p, progress.clone())),
+        child
+            .stderr
+            .take()
+            .map(|p| stream_lines(p, progress.clone())),
+    ];
+
+    let outcome = tokio::select! {
+        status = child.wait() => status.map_err(|e| format!("{program} failed: {e}")),
+        _ = tokio::time::sleep(timeout) => Err(format!("{program} timed out after {}s", timeout.as_secs())),
+        _ = progress.cancelled() => Err("cancelled".to_string()),
+    };
+    if outcome.is_err() {
+        kill_group(&mut child).await;
     }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        log.push(line);
+    for reader in readers.into_iter().flatten() {
+        // A process outside the group could still hold the pipe open; after a
+        // kill, stop reading rather than wait for it.
+        if outcome.is_err() {
+            let abort = reader.abort_handle();
+            if tokio::time::timeout(Duration::from_secs(1), reader)
+                .await
+                .is_err()
+            {
+                abort.abort();
+            }
+        } else {
+            let _ = reader.await;
+        }
     }
-    if output.status.success() {
+
+    let status = outcome?;
+    if status.success() {
         Ok(())
     } else {
         Err(format!(
             "{program} exited with code {}",
-            output.status.code().unwrap_or(-1)
+            status.code().unwrap_or(-1)
         ))
     }
+}
+
+/// Kills the command and everything in its process group.
+async fn kill_group(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    let _ = child.kill().await;
+}
+
+/// Build timeout: `AMOEBA_BUILD_TIMEOUT_SECS`, or 15 minutes. Large projects
+/// (a browser engine, say) can need longer.
+pub fn build_timeout() -> Duration {
+    std::env::var("AMOEBA_BUILD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_BUILD_TIMEOUT)
 }
 
 async fn nixpacks_available() -> bool {
@@ -234,8 +422,10 @@ pub async fn build_image(
     name: &str,
     request: &BuildRequest,
     registry: Option<&str>,
+    progress: &Arc<BuildProgress>,
 ) -> Result<BuildOutcome, BuildFailure> {
-    let mut log = BuildLog::default();
+    let log = progress;
+    let build_timeout = build_timeout();
     let temp = match tempfile::tempdir() {
         Ok(dir) => dir,
         Err(e) => return Err(log.fail(format!("failed to create build dir: {e}"))),
@@ -250,7 +440,7 @@ pub async fn build_image(
                 &clone(url, r#ref.as_deref()),
                 temp.path(),
                 CLONE_TIMEOUT,
-                &mut log,
+                log,
             )
             .await
             {
@@ -269,7 +459,7 @@ pub async fn build_image(
             match context_url {
                 Some(url) => {
                     let args = clone(url, context_ref.as_deref());
-                    if let Err(e) = run("git", &args, temp.path(), CLONE_TIMEOUT, &mut log).await {
+                    if let Err(e) = run("git", &args, temp.path(), CLONE_TIMEOUT, log).await {
                         return Err(log.fail(format!("clone failed: {e}")));
                     }
                 }
@@ -291,13 +481,13 @@ pub async fn build_image(
         Builder::Docker => ("docker", docker_build_args(&tag)),
         Builder::Nixpacks => ("nixpacks", nixpacks_args(&tag)),
     };
-    if let Err(e) = run(program, &args, &ctx, BUILD_TIMEOUT, &mut log).await {
+    if let Err(e) = run(program, &args, &ctx, build_timeout, log).await {
         return Err(log.fail(format!("build failed: {e}")));
     }
 
     if registry.is_some_and(|r| !r.trim().is_empty()) {
         let push = vec!["push".to_string(), tag.clone()];
-        if let Err(e) = run("docker", &push, &ctx, BUILD_TIMEOUT, &mut log).await {
+        if let Err(e) = run("docker", &push, &ctx, build_timeout, log).await {
             return Err(log.fail(format!("push failed: {e}")));
         }
     }
@@ -305,7 +495,7 @@ pub async fn build_image(
     log.push(format!("Built {tag}"));
     Ok(BuildOutcome {
         image: tag,
-        log: log.0,
+        log: log.log(),
     })
 }
 
@@ -409,12 +599,57 @@ mod tests {
 
     #[test]
     fn log_keeps_the_tail() {
-        let mut log = BuildLog::default();
+        let progress = BuildProgress::new();
         for i in 0..(MAX_LOG_LINES + 10) {
-            log.push(i.to_string());
+            progress.push(i.to_string());
         }
-        assert_eq!(log.0.len(), MAX_LOG_LINES);
-        assert_eq!(log.0[0], "10");
+        let log = progress.log();
+        assert_eq!(log.len(), MAX_LOG_LINES);
+        assert_eq!(log[0], "10");
+        assert_eq!(progress.status(3).log, ["507", "508", "509"]);
+    }
+
+    // @lat: [[deploy#Source builds#Live progress]]
+    #[tokio::test]
+    async fn output_is_visible_while_running_and_cancel_stops_the_command() {
+        let progress = BuildProgress::new();
+        let args: Vec<String> = vec!["-c".into(), "echo cloning; sleep 30".into()];
+        let running = {
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                run(
+                    "sh",
+                    &args,
+                    Path::new("."),
+                    Duration::from_secs(60),
+                    &progress,
+                )
+                .await
+            })
+        };
+
+        // The first line shows up before the command finishes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !progress.log().iter().any(|l| l == "cloning") {
+            assert!(
+                Instant::now() < deadline,
+                "no live output: {:?}",
+                progress.log()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let status = progress.status(10);
+        assert_eq!(status.state, BuildState::Running);
+        assert!(status.step.starts_with("sh -c"));
+
+        let started = Instant::now();
+        progress.cancel();
+        let result = running.await.unwrap();
+        assert_eq!(result, Err("cancelled".to_string()));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "sleep was not killed"
+        );
     }
 
     /// Needs a running Docker daemon: `cargo test -- --ignored`.
@@ -426,7 +661,7 @@ mod tests {
             context_url: None,
             context_ref: None,
         };
-        let outcome = build_image("amoeba-build-test", &request, None)
+        let outcome = build_image("amoeba-build-test", &request, None, &BuildProgress::new())
             .await
             .unwrap();
         assert_eq!(outcome.image, "amoeba/amoeba-build-test:latest");
@@ -441,9 +676,14 @@ mod tests {
             url: "https://github.com/crccheck/docker-hello-world".into(),
             r#ref: None,
         };
-        let outcome = build_image("amoeba-git-build-test", &request, None)
-            .await
-            .unwrap_or_else(|f| panic!("{}\n{}", f.message, f.log.join("\n")));
+        let outcome = build_image(
+            "amoeba-git-build-test",
+            &request,
+            None,
+            &BuildProgress::new(),
+        )
+        .await
+        .unwrap_or_else(|f| panic!("{}\n{}", f.message, f.log.join("\n")));
         assert_eq!(outcome.image, "amoeba/amoeba-git-build-test:latest");
         assert!(outcome.log.iter().any(|l| l.starts_with("$ git clone")));
     }

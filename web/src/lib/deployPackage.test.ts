@@ -5,6 +5,8 @@ import {
   buildRequestFor,
   requestBuild,
   validateServiceName,
+  fetchBuildStatus,
+  formatElapsed,
   buildInstallValues,
   buildManifest,
   buildZip,
@@ -148,5 +150,21 @@ describe('source builds', () => {
     );
     expect(err2.message).toBe('Forbidden');
     expect(err2.log).toEqual([]);
+  });
+});
+
+describe('build progress', () => {
+  it('formats elapsed time', () => {
+    expect(formatElapsed(42)).toBe('42s');
+    expect(formatElapsed(185)).toBe('3m 05s');
+    expect(formatElapsed(3720)).toBe('1h 02m');
+  });
+
+  it('reads the status, and null when there is no build', async () => {
+    const status = { state: 'running', step: 'git clone', elapsed_seconds: 3, log: ['$ git clone'] };
+    const ok = (async () => new Response(JSON.stringify(status), { status: 200 })) as typeof fetch;
+    expect(await fetchBuildStatus('svc', 't', ok)).toEqual(status);
+    const missing = (async () => new Response('no build', { status: 404 })) as typeof fetch;
+    expect(await fetchBuildStatus('svc', 't', missing)).toBeNull();
   });
 });

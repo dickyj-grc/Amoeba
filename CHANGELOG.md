@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Console
+
+- **Build progress.** Deploying from Git or a Dockerfile now shows elapsed time, the command running and the live build log, updated every 2 seconds, with a "Stop build" button. Before, the button just said "Building image..." until the build ended.
+- **Less flicker.** The 3-second refresh no longer shows a loading state, skips re-rendering when nothing changed, and pauses while the tab is hidden. Services stay in a fixed order; before, they could reshuffle on every refresh.
+
+### Gateway
+
+- **`GET` and `DELETE /admin/apps/<name>/build`** report and cancel the latest build. A second build for the same name while one runs is `409`. Cancelling kills the build's whole process group.
+- **`AMOEBA_BUILD_TIMEOUT_SECS`** overrides the 15-minute build timeout, for large projects.
+- **`GET /admin/apps`** returns names sorted.
+
 ## 0.1.4 — 2026-11-11
 
 ### Fixes

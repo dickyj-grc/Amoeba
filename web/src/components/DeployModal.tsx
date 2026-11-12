@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Code,
   FolderGit2,
   Layers,
+  Loader2,
   Plus,
   Rocket,
   Shield,
+  Square,
   Trash,
   X,
 } from 'lucide-react';
@@ -13,7 +15,11 @@ import {
   BuildError,
   buildDeployForm,
   buildRequestFor,
+  cancelBuild,
+  fetchBuildStatus,
+  formatElapsed,
   requestBuild,
+  type BuildStatus,
   validateServiceName,
   type EnvPair,
 } from '../lib/deployPackage';
@@ -48,8 +54,48 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [buildLog, setBuildLog] = useState<string[]>([]);
   const isSubmitting = phase !== null;
+  // Live build progress, polled while the build request is pending.
+  const [buildStatus, setBuildStatus] = useState<BuildStatus | null>(null);
+  const [buildStartedAt, setBuildStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const [stopping, setStopping] = useState(false);
+  const buildName = useRef('');
+  const logRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    if (phase !== 'building') return;
+    const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
+    let active = true;
+    const poll = async () => {
+      const status = await fetchBuildStatus(buildName.current, token);
+      if (active && status) setBuildStatus(status);
+    };
+    poll();
+    const statusTimer = setInterval(poll, 2000);
+    const clock = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      active = false;
+      clearInterval(statusTimer);
+      clearInterval(clock);
+    };
+  }, [phase]);
+
+  // Keep the newest log line in view.
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [buildStatus]);
 
   if (!isOpen) return null;
+
+  const handleStopBuild = async () => {
+    setStopping(true);
+    const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
+    try {
+      await cancelBuild(buildName.current, token);
+    } catch {
+      // The build request reports the outcome either way.
+    }
+  };
 
   const handleAddEnv = () => {
     setEnvPairs([...envPairs, { key: '', value: '', isSecret: false }]);
@@ -87,6 +133,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         contextUrl,
       });
       if (build) {
+        buildName.current = name.trim();
+        setBuildStatus(null);
+        setBuildStartedAt(Date.now());
+        setNow(Date.now());
+        setStopping(false);
         setPhase('building');
         image = await requestBuild(name.trim(), build, token);
       }
@@ -394,14 +445,58 @@ export const DeployModal: React.FC<DeployModalProps> = ({
             </div>
           </div>
 
+          {phase === 'building' && (
+            <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2 text-foreground">
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-400" />
+                  <span className="font-medium">
+                    {stopping ? 'Stopping build' : 'Building image'} ·{' '}
+                    {formatElapsed(buildStartedAt ? (now - buildStartedAt) / 1000 : 0)}
+                  </span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">Still running; output updates every 2s</span>
+              </div>
+              {buildStatus?.step && (
+                <p className="truncate font-mono text-[10px] text-muted-foreground" title={buildStatus.step}>
+                  $ {buildStatus.step}
+                </p>
+              )}
+              <pre
+                ref={logRef}
+                className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-background/60 p-2 font-mono text-[10px] text-muted-foreground"
+              >
+                {buildStatus && buildStatus.log.length > 0
+                  ? buildStatus.log.slice(-60).join('\n')
+                  : 'Waiting for output...'}
+              </pre>
+              <p className="text-[10px] text-muted-foreground">
+                Large projects can take many minutes. Builds stop after 15 minutes unless the server sets
+                AMOEBA_BUILD_TIMEOUT_SECS.
+              </p>
+            </div>
+          )}
+
           <div className="flex items-center justify-end gap-2 pt-4 border-t border-border">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md px-3.5 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-            >
-              Cancel
-            </button>
+            {phase === 'building' ? (
+              <button
+                type="button"
+                onClick={handleStopBuild}
+                disabled={stopping}
+                className="inline-flex items-center gap-1.5 rounded-md px-3.5 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+              >
+                <Square className="h-3 w-3" />
+                <span>{stopping ? 'Stopping...' : 'Stop build'}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-md px-3.5 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+              >
+                Cancel
+              </button>
+            )}
             <button
               type="submit"
               disabled={isSubmitting}

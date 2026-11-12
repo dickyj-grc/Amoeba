@@ -82,8 +82,10 @@ class AmoebaApiClient {
 
     if (!list || !list.apps) return [];
 
+    // Sorted so rows keep their place between refreshes.
+    const names = [...list.apps].sort();
     const statuses = await Promise.all(
-      list.apps.map(async (name) => {
+      names.map(async (name) => {
         try {
           const status = await this.request<AppStatusResponse>(`/admin/apps/${encodeURIComponent(name)}`, {
             method: 'GET',
