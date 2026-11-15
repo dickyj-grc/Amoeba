@@ -76,13 +76,13 @@ Ready-made app packages for known images, so a user deploys one without knowing 
 
 - `GET /admin/library` ([[src/routing/apps_admin.rs#list_library]]) lists entries with what the console needs: image, command, port, interface, and the env and secret inputs from the manifest's `schema`.
 - `GET /admin/library/<id>` returns one entry.
-- `POST /admin/library/<id>/install` ([[src/routing/apps_admin.rs#install_from_library]]) takes `{name?, public?, env, secrets}`.
+- `POST /admin/library/<id>/install` ([[src/routing/apps_admin.rs#install_from_library]]) takes `{name?, public?, env, secrets, replace?, overrides?}`.
 
 ### Install from the library
 
 The install builds the package zip from the bundled files and installs it exactly like an upload, through the same readiness probe.
 
-[[src/apps/library.rs#package_zip]] applies the installer's name and `public` choice to the manifest. A rename also renames the console token role `mcp:<old>` in its permissions, so tokens issued for the new name work. Names follow the image-name rule (lowercase), as in the deploy form.
+[[src/apps/library.rs#package_zip]] applies the installer's name and `public` choice to the manifest. A rename also renames the console token role `mcp:<old>` in its permissions, so tokens issued for the new name work. Names follow the image-name rule (lowercase), as in the deploy form. The install records `source: {kind: library, id}`; a name already in use needs `replace` ([[deploy#App library#Name conflicts and settings]]). The console's "Adjust" changes go as `overrides`, with a renamed app's `mcp:<old>` grants rewritten by [[web/src/lib/settings.ts#renameTokenRole]].
 
 ### Start command
 
@@ -91,6 +91,16 @@ The install builds the package zip from the bundled files and installs it exactl
 `${PORT}` in it becomes `placement.port` ([[src/apps/schema.rs#expand_command]]), so the port is written once; any other `${...}` fails the install. Image apps also get `PORT` in their env, so their `schema` must not declare it.
 
 It is stored, expanded, as `container.command` in the catalog. The Docker driver sets it as the container's `Cmd`; the Apple driver appends it after the image in `container run` ([[src/lifecycle/apple_container.rs#AppleContainerDriver#run_args]]).
+
+### Name conflicts and settings
+
+An install onto a name another service holds is refused with 409, unless `replace` is set, so a deploy never silently replaces a working service.
+
+Each service records where it came from as `source` ([[src/config/schema.rs#AppSource]]): `library` with the app's id, or `package` for uploads and the console's other tabs. Reinstalling the same source is an upgrade; [[src/apps/manager.rs#check_name_free]] words the refusal with the existing source.
+
+`overrides` ([[src/config/schema.rs#AppOverrides]]) hold how a site runs an app: permissions, public, memory, CPU and idle stop (`0` keeps it running). They are applied over the manifest at install, kept when the same source is reinstalled, and dropped when another app replaces the name. `PATCH /admin/apps/<name>/settings` ([[src/routing/apps_admin.rs#update_app_settings]]) changes them later; a memory or CPU change stops a running container so the next request recreates it. A permission change through `PATCH /admin/apps/<name>` is recorded as an override too. `GET /admin/apps/<name>` reports `source`, the current `settings` and the `overrides`.
+
+The console shows the same form ([[web/src/components/SettingsFields.tsx#SettingsFields]]) as "Adjust" before a library deploy and as each service's Settings dialog, sending only changed fields ([[web/src/lib/settings.ts#changedSettings]]). Typing a taken name shows who holds it, with "Use <name>-2" and "Replace it"; the Git and Dockerfile tabs check before building.
 
 ### Changed specs recreate the container
 

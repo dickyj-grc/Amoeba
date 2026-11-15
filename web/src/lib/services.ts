@@ -27,5 +27,7 @@ export function toServiceItem(status: AppStatusResponse): ServiceItem {
     },
     ...(runtime ? { port: runtime.port, public: runtime.public } : {}),
     ...(status.interface ? { interface: status.interface } : {}),
+    ...(status.source ? { source: status.source } : {}),
+    ...(status.settings ? { settings: status.settings } : {}),
   };
 }

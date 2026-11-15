@@ -330,6 +330,8 @@ mod tests {
             header_from_secret: HashMap::new(),
             local_upstream: false,
             interface: None,
+            source: None,
+            overrides: None,
         }
     }
 

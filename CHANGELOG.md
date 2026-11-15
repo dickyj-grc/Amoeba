@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Upgrade notes
+
+- **Installing onto a taken name now fails with 409.** Before, it silently replaced the existing service. Send `replace: true` (in the package `values`, or the library install body) to replace or upgrade it. The MCP server's `deploy_service` tool takes `replace` too.
+
+### Settings that stay
+
+- **Adjust before deploy.** The App library tab has an "Adjust" section: who can call the app, memory, CPU and idle stop, starting from the app's own values.
+- **Settings after deploy.** Each service has a Settings button with the same form. Memory and CPU changes restart the app; the others apply at once.
+- **Kept on upgrade.** These settings are stored as `overrides` and re-applied when the same app is reinstalled or upgraded. Permission changes through `PATCH /admin/apps/<name>` are kept the same way. Another app taking the name starts from its own manifest.
+- **Name conflicts.** The deploy dialog says when a name is taken and by what, offering "Use <name>-2" or "Replace it". The Git and Dockerfile tabs check before starting a build.
+- **API:** `PATCH /admin/apps/<name>/settings` with any of `permissions`, `public`, `memory`, `cpu_cores`, `cooldown_seconds`. `GET /admin/apps/<name>` adds `source`, `settings` and `overrides`.
+
+### Fixes
+
+- **Apps stuck in "installed".** An install's state could be lost to the catalog reload it triggers, so the app showed "installed" forever although it was running. State updates are now atomic.
+- **Nightly e2e: droplet refused (422).** The e2e now tries other DigitalOcean regions when one refuses the droplet, and prints DigitalOcean's reason.
+
 ## 0.1.5 — 2026-11-12
 
 ### Upgrade notes

@@ -63,13 +63,23 @@ This covers an unset or empty env var, a missing or empty `token_secret` file, a
 
 `GET /admin/apps/<name>` reports the install lifecycle (`installed`, `pulling`, `ready`, `error` with a message), a `runtime` block (`running`, `active_requests`, `last_request_at`, `port`, `public`) and the package's `interface`.
 
-[[src/routing/apps_admin.rs#app_status]] builds it. The console's table maps it with [[web/src/lib/services.ts#toServiceItem]] to Running, Preparing, Idle or Error, and shows the error message and port.
+It also reports the app's `source`, current `settings` and `overrides` (see [[deploy#App library#Name conflicts and settings]]).
+
+[[src/routing/apps_admin.rs#app_status]] builds it. The console's table maps it with [[web/src/lib/services.ts#toServiceItem]] to Running, Preparing, Idle or Error, and shows the error message and port. Each row's Settings button opens [[web/src/components/ServiceSettingsModal.tsx#ServiceSettingsModal]].
 
 ### Run state
 
 The gateway records whether it last started or stopped each workload; `running` is `null` until it has done either, e.g. after a gateway restart.
 
 [[src/lifecycle/container.rs#should_stop]] keeps the reaper from stopping a workload it already stopped. Before this, an idle service was "scaled to zero" again on every 10-second sweep.
+
+The proxy starts a workload on a fresh activation, and also whenever the gateway knows it stopped it. Without the second case an always-on service (no idle stop) counts as active forever, so after a stop, such as a restart for a settings change, its requests got 502 instead of starting it.
+
+### Reloads keep app states
+
+An install's lifecycle state must survive the catalog reloads it triggers, or the app reports "installed" forever while its readiness probe updates a state no one reads.
+
+Each install reloads twice: the handler's reload, then the file watcher's. Both, and `set_app_state`, used to copy the state map, change it and store it, so the later writer dropped the other's change; a nightly e2e saw `streaming-echo` stuck that way. [[src/state.rs#AppState#apply_catalog]], `set_app_state` and `remove_app_state` now update with `ArcSwap::rcu`, which retries on a concurrent write.
 
 ### Not ready names the port
 

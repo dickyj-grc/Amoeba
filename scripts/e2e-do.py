@@ -13,7 +13,9 @@ Required environment variables:
 
 Optional:
     AMOEBA_AGE_SECRET_KEY   Age identity for decrypting app secrets
-    DO_REGION               Default: nyc3
+    DO_REGIONS              Regions to try in order when one refuses the droplet
+                            (422). Default: nyc3,nyc1,sfo3,tor1. DO_REGION still
+                            works and pins a single region.
     DO_SIZE                 Default: s-4vcpu-8gb (≈ $48/mo)
     DO_IMAGE                Default: ubuntu-24-04-x64
 """

@@ -1,5 +1,6 @@
 //! Deserialized shape of an Amoeba App Package manifest (`amoeba.yaml`).
 
+use crate::config::schema::{AppOverrides, AppSource};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -235,6 +236,15 @@ pub struct InstallValues {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub secrets: HashMap<String, String>,
+    /// Allows installing onto a name already in use, replacing that service.
+    #[serde(default)]
+    pub replace: bool,
+    /// Site settings over the manifest's.
+    #[serde(default)]
+    pub overrides: Option<AppOverrides>,
+    /// Set by the route, never by the caller.
+    #[serde(skip)]
+    pub source: Option<AppSource>,
 }
 
 /// One role grant or revoke against a service's access map.

@@ -10,8 +10,8 @@ use super::schema::{
 };
 use super::state::LifecycleStatus;
 use crate::config::schema::{
-    ContainerResources, ContainerSpec, MachineConfig, Placement, ResourceQuantities,
-    ServiceCatalog, ServiceConfig, StackSpec, UpstreamAuth,
+    AppOverrides, AppSource, ContainerResources, ContainerSpec, MachineConfig, Placement,
+    ResourceQuantities, ServiceCatalog, ServiceConfig, StackSpec, UpstreamAuth,
 };
 use crate::lifecycle::container::wait_until_ready;
 use crate::state::AppState;
@@ -41,6 +41,8 @@ pub enum AppManagerError {
     Command(String),
     Decrypt(String),
     Quota(String),
+    /// The name is taken by another service and `replace` was not set.
+    Conflict(String),
 }
 
 impl std::fmt::Display for AppManagerError {
@@ -52,6 +54,7 @@ impl std::fmt::Display for AppManagerError {
             AppManagerError::Zip(e) => write!(f, "zip error: {e}"),
             AppManagerError::Validation(msg) => write!(f, "validation error: {msg}"),
             AppManagerError::Command(msg) => write!(f, "command error: {msg}"),
+            AppManagerError::Conflict(msg) => write!(f, "{msg}"),
             AppManagerError::Decrypt(msg) => write!(f, "decryption error: {msg}"),
             AppManagerError::Quota(msg) => write!(f, "quota exceeded: {msg}"),
         }
@@ -155,6 +158,21 @@ impl AppManager {
         validate_values(&manifest, &values)?;
 
         let app_name = manifest.service_name().to_string();
+        let source = AppSource {
+            version: (!manifest.version.is_empty()).then(|| manifest.version.clone()),
+            ..values.source.clone().unwrap_or(AppSource {
+                kind: "package".into(),
+                id: None,
+                version: None,
+            })
+        };
+        // Checked again under the lock; this early check keeps a refused
+        // install from overwriting the existing service's secrets.
+        check_name_free(
+            &app_name,
+            load_catalog(&self.catalog_path)?.services.get(&app_name),
+            values.replace,
+        )?;
         let stack_dir = self.stacks_dir().join(&app_name);
         let app_secrets_dir = self.secrets_dir().join(&app_name);
 
@@ -199,7 +217,23 @@ impl AppManager {
         let _guard = self.lock.lock().await;
         let mut catalog = load_catalog(&self.catalog_path)?;
         upsert_machine(&mut catalog);
+        let existing = catalog.services.get(&app_name);
+        check_name_free(&app_name, existing, values.replace)?;
+        // An upgrade of the same app keeps the site's settings; another app
+        // taking the name starts from its own manifest.
+        let mut overrides = existing
+            .filter(|e| e.source.as_ref().is_some_and(|s| s.same_app(&source)))
+            .and_then(|e| e.overrides.clone())
+            .unwrap_or_default();
+        if let Some(newer) = values.overrides.clone() {
+            overrides.merge(newer);
+        }
         let mut service_config = build_service_config(&manifest, &values, &self.stacks_dir());
+        overrides
+            .apply(&mut service_config)
+            .map_err(AppManagerError::Validation)?;
+        service_config.overrides = (!overrides.is_empty()).then_some(overrides);
+        service_config.source = Some(source);
         // Apple containers get a fresh IP on every start, resolved by the
         // driver, so their services must not name a host.
         if crate::config::watcher::service_uses_apple_container(&service_config, &catalog) {
@@ -281,12 +315,85 @@ impl AppManager {
             AppManagerError::Validation(format!("app '{app_name}' is not installed"))
         })?;
         apply_policy_patch(service, &patch)?;
+        // Record the result as a setting, so reinstalling the app keeps it.
+        let touched_permissions =
+            patch.permissions.is_some() || patch.grant.is_some() || patch.revoke.is_some();
+        if (touched_permissions || patch.public.is_some()) && service.tenant_permissions.is_none() {
+            let mut recorded = service.overrides.take().unwrap_or_default();
+            recorded.merge(AppOverrides {
+                permissions: touched_permissions.then(|| service.permissions.clone()),
+                public: patch.public,
+                ..Default::default()
+            });
+            service.overrides = Some(recorded);
+        }
         let updated = service.clone();
         crate::config::watcher::validate_service_access(app_name, &updated)
             .map_err(AppManagerError::Validation)?;
         enforce_tenant_quota(&catalog, app_name, &updated)?;
         save_catalog(&self.catalog_path, &catalog)?;
         Ok(updated)
+    }
+
+    /// Changes an installed app's settings and keeps them for reinstalls.
+    /// Returns whether its container must restart for them to apply (memory
+    /// or CPU changed).
+    pub async fn update_settings(
+        &self,
+        app_name: &str,
+        settings: AppOverrides,
+    ) -> Result<bool, AppManagerError> {
+        let _guard = self.lock.lock().await;
+        let mut catalog = load_catalog(&self.catalog_path)?;
+        let service = catalog.services.get_mut(app_name).ok_or_else(|| {
+            AppManagerError::Validation(format!("app '{app_name}' is not installed"))
+        })?;
+        if settings.permissions.is_some() && service.tenant_permissions.is_some() {
+            return Err(AppManagerError::Validation(
+                "this app uses per-org permissions; change them with PATCH /admin/apps/<name>"
+                    .into(),
+            ));
+        }
+        let limits_before = AppOverrides::current(service);
+        settings
+            .apply(service)
+            .map_err(AppManagerError::Validation)?;
+        let limits_after = AppOverrides::current(service);
+        let restart = (limits_before.memory, limits_before.cpu_cores)
+            != (limits_after.memory, limits_after.cpu_cores);
+
+        let mut stored = service.overrides.take().unwrap_or_default();
+        stored.merge(settings);
+        service.overrides = (!stored.is_empty()).then_some(stored);
+
+        let updated = service.clone();
+        crate::config::watcher::validate_service_access(app_name, &updated)
+            .map_err(AppManagerError::Validation)?;
+        enforce_tenant_quota(&catalog, app_name, &updated)?;
+        crate::config::watcher::validate_catalog(&catalog).map_err(AppManagerError::Validation)?;
+        save_catalog(&self.catalog_path, &catalog)?;
+        Ok(restart)
+    }
+}
+
+/// Refuses to install onto a name another service holds, unless replacing.
+fn check_name_free(
+    app_name: &str,
+    existing: Option<&ServiceConfig>,
+    replace: bool,
+) -> Result<(), AppManagerError> {
+    match existing {
+        Some(service) if !replace => {
+            let from = service
+                .source
+                .as_ref()
+                .map(|s| format!(", installed from {}", s.describe()))
+                .unwrap_or_default();
+            Err(AppManagerError::Conflict(format!(
+                "a service named '{app_name}' already exists{from}. Choose another name, or install with replace: true to replace it"
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -746,6 +853,8 @@ fn build_service_config(
         header_from_secret,
         local_upstream: manifest.local_upstream,
         interface: manifest.interface.clone(),
+        source: None,
+        overrides: None,
     }
 }
 
@@ -1361,6 +1470,7 @@ schema:
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
                 secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+                ..Default::default()
             };
             manager.install(&package, values)
         };
@@ -1987,13 +2097,85 @@ permissions:
             .unwrap_err();
         assert!(matches!(err, AppManagerError::Quota(_)));
 
+        // Replacing an existing service does not count as another one.
         manager
             .install(
                 &package_zip_with_manifest(&manifest("one")),
-                InstallValues::default(),
+                InstallValues {
+                    replace: true,
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_follow_the_app_not_the_name() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let package = package_zip_with_manifest(image_manifest());
+        let values = |kind: &str, replace: bool| InstallValues {
+            secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+            replace,
+            source: Some(AppSource {
+                kind: kind.into(),
+                id: (kind == "library").then(|| "demo".into()),
+                version: None,
+            }),
+            ..Default::default()
+        };
+        let service = || load_catalog(&catalog_path).unwrap().services["test-image"].clone();
+        manager
+            .install(&package, values("library", false))
+            .await
+            .unwrap();
+
+        // Memory needs a new container; idle time does not.
+        let memory = AppOverrides {
+            memory: Some("256Mi".into()),
+            ..Default::default()
+        };
+        assert!(manager.update_settings("test-image", memory).await.unwrap());
+        let idle = AppOverrides {
+            cooldown_seconds: Some(30),
+            ..Default::default()
+        };
+        assert!(!manager.update_settings("test-image", idle).await.unwrap());
+        // A PATCH to the policy is kept as a setting too.
+        let patch: PolicyPatch =
+            serde_json::from_str(r#"{"grant":{"operation":"read","role":"analyst"}}"#).unwrap();
+        manager.update_policy("test-image", patch).await.unwrap();
+
+        manager
+            .install(&package, values("library", true))
+            .await
+            .unwrap();
+        let upgraded = service();
+        assert_eq!(upgraded.placement.cooldown_seconds, Some(30));
+        assert_eq!(upgraded.permissions["read"], ["admin", "analyst"]);
+        let memory_mb = |s: &ServiceConfig| {
+            s.container
+                .as_ref()
+                .unwrap()
+                .resources
+                .as_ref()?
+                .limits
+                .memory
+                .map(|q| q.0)
+        };
+        assert_eq!(memory_mb(&upgraded), Some(256));
+
+        // Another app taking the name starts from its own manifest.
+        manager
+            .install(&package, values("package", true))
+            .await
+            .unwrap();
+        let replaced = service();
+        assert_eq!(replaced.overrides, None);
+        assert_eq!(replaced.placement.cooldown_seconds, Some(60));
+        assert_eq!(memory_mb(&replaced), None);
     }
 
     #[tokio::test]

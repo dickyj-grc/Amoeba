@@ -14,6 +14,7 @@ const entry = (id: string, title: string, images: string[], repos: string[], tag
   port: 8080,
   public: false,
   local_upstream: false,
+  permissions: {},
   env: {},
   secrets: {},
 });

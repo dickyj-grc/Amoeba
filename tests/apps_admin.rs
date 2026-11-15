@@ -5,9 +5,9 @@ use amoeba::auth::jwt::{local_engine, local_engine_with_revocation};
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::auth::revocation::RevocationStore;
 use amoeba::routing::apps_admin::{
-    build_app_image, build_status, cancel_build, get_library_entry, install_app,
+    build_app_image, build_status, cancel_build, get_app_status, get_library_entry, install_app,
     install_from_library, issue_service_token, list_apps, list_library, list_service_tokens,
-    revoke_service_token, uninstall_app, update_app_policy,
+    revoke_service_token, uninstall_app, update_app_policy, update_app_settings,
 };
 use amoeba::state::AppState;
 use axum::{
@@ -16,7 +16,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Request, StatusCode, header::AUTHORIZATION},
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
@@ -81,8 +81,11 @@ fn build_app_with(catalog_path: &str, revocation: Option<RevocationStore>) -> Ro
         .route("/apps", post(install_app).get(list_apps))
         .route(
             "/apps/:name",
-            delete(uninstall_app).patch(update_app_policy),
+            get(get_app_status)
+                .delete(uninstall_app)
+                .patch(update_app_policy),
         )
+        .route("/apps/:name/settings", patch(update_app_settings))
         .route(
             "/apps/:name/build",
             post(build_app_image).get(build_status).delete(cancel_build),
@@ -640,4 +643,121 @@ async fn build_endpoint_is_admin_only_and_rejects_unsafe_input_before_running_an
         .await
         .unwrap();
     assert!(res.status().is_client_error());
+}
+
+// @lat: [[deploy#App library#Name conflicts and settings]]
+#[tokio::test]
+async fn taken_names_need_replace_and_settings_survive_upgrades() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("services.json");
+    let catalog = catalog.to_str().unwrap();
+    let app = build_app(catalog);
+    let call =
+        |method: &str, uri: &str, body: &str| app.clone().oneshot(admin_json(method, uri, body));
+    let install = "/admin/library/lightpanda-mcp/install";
+
+    let res = call("POST", install, r#"{"overrides":{"memory":"2Gi"}}"#)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // The name is taken: refused, naming what holds it.
+    let res = call("POST", install, "{}").await.unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let message = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        message.contains("the app library's lightpanda-mcp 1.0.0"),
+        "{message}"
+    );
+
+    // Settings changed after install apply now and are reported.
+    let res = call(
+        "PATCH",
+        "/admin/apps/lightpanda/settings",
+        r#"{"cooldown_seconds":0,"permissions":{"add":["admin","research"]}}"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let status = json_body(res).await;
+    assert_eq!(status["settings"]["memory"], "2048Mi");
+    assert_eq!(status["settings"]["cooldown_seconds"], 0);
+    assert_eq!(status["source"]["id"], "lightpanda-mcp");
+
+    // Upgrading the same app keeps them all.
+    let res = call("POST", install, r#"{"replace":true}"#).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let res = call("GET", "/admin/apps/lightpanda", "").await.unwrap();
+    let status = json_body(res).await;
+    assert_eq!(status["settings"]["memory"], "2048Mi");
+    assert_eq!(status["settings"]["cooldown_seconds"], 0);
+    assert_eq!(
+        status["settings"]["permissions"]["add"],
+        serde_json::json!(["admin", "research"])
+    );
+
+    // Unknown or invalid settings are refused.
+    let res = call(
+        "PATCH",
+        "/admin/apps/lightpanda/settings",
+        r#"{"image":"x"}"#,
+    )
+    .await
+    .unwrap();
+    assert!(res.status().is_client_error());
+    let res = call(
+        "PATCH",
+        "/admin/apps/lightpanda/settings",
+        r#"{"memory":"lots"}"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// @lat: [[gateway#Service status#Reloads keep app states]]
+// AppState::new starts the reaper, so it needs a Tokio runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn app_states_survive_concurrent_catalog_reloads() {
+    use amoeba::apps::state::AppLifecycleState;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("services.json");
+    std::fs::write(&catalog, r#"{"version":1,"services":{}}"#).unwrap();
+    let state = AppState::new(
+        catalog.to_str().unwrap(),
+        "/nonexistent/users.json",
+        Arc::new(local_engine(JWT_SECRET)),
+        None,
+    );
+
+    let reloader = {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            for _ in 0..2_000 {
+                state.reload_catalog().unwrap();
+            }
+        })
+    };
+    let registered: Vec<_> = (0..300)
+        .map(|i| {
+            let name = format!("app-{i}");
+            let app_state = Arc::new(AppLifecycleState::installed());
+            state.set_app_state(&name, app_state.clone());
+            (name, app_state)
+        })
+        .collect();
+    reloader.join().unwrap();
+
+    for (name, app_state) in registered {
+        let stored = state.app_state(&name).expect("state kept");
+        assert!(Arc::ptr_eq(&stored, &app_state), "{name} was replaced");
+    }
 }

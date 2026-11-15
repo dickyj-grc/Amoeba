@@ -7,6 +7,23 @@ export interface AppLifecycleSnapshot {
   error?: string;
 }
 
+/** Where an installed app came from. */
+export interface AppSource {
+  kind: 'library' | 'package';
+  id?: string;
+  version?: string;
+}
+
+/** How a site runs an app: who may call it, its memory and CPU, and when it
+ *  idles. `cooldown_seconds: 0` keeps it running. */
+export interface AppSettings {
+  permissions?: Record<string, string[]>;
+  public?: boolean;
+  memory?: string;
+  cpu_cores?: number;
+  cooldown_seconds?: number;
+}
+
 export interface ServiceItem {
   name: string;
   state: AppLifecycleSnapshot;
@@ -16,6 +33,9 @@ export interface ServiceItem {
   memory?: string;
   cpu_cores?: number;
   interface?: AppInterface;
+  source?: AppSource;
+  /** Current settings, every field set. */
+  settings?: AppSettings;
 }
 
 export interface AppsListResponse {
@@ -38,6 +58,8 @@ export interface AppStatusResponse {
     public: boolean;
   };
   interface?: AppInterface;
+  source?: AppSource;
+  settings?: AppSettings;
 }
 
 export interface LoginResponse {
@@ -114,6 +136,11 @@ export interface LibraryEntry {
   port: number;
   public: boolean;
   local_upstream: boolean;
+  permissions: Record<string, string[]>;
+  memory?: string;
+  cpu_cores?: number;
+  /** Absent: keeps running. */
+  cooldown_seconds?: number;
   interface?: AppInterface;
   env: Record<string, LibraryField>;
   secrets: Record<string, LibraryField>;

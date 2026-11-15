@@ -298,6 +298,10 @@ fn tool_definitions() -> Vec<ToolDef> {
                         "type": "integer",
                         "description": "CPU core limit."
                     },
+                    "replace": {
+                        "type": "boolean",
+                        "description": "Replace an existing service with this name. Without it, deploying onto a taken name fails."
+                    },
                     "readiness_timeout_secs": {
                         "type": "integer",
                         "description": "How long to wait for the service to become ready (default 120)."
@@ -921,6 +925,7 @@ async fn install_app_on_amoeba(
     public: bool,
     memory: Option<&str>,
     cpu_cores: Option<u64>,
+    replace: bool,
 ) -> Result<(u16, String), String> {
     let manifest = AppManifest {
         api_version: "v1".into(),
@@ -1007,6 +1012,8 @@ async fn install_app_on_amoeba(
     let values = amoeba::apps::schema::InstallValues {
         env: env.clone(),
         secrets: secrets.clone(),
+        replace,
+        ..Default::default()
     };
     let values_json =
         serde_json::to_string(&values).map_err(|e| format!("failed to serialize values: {e}"))?;
@@ -1252,6 +1259,7 @@ async fn handle_tool_call(
             let public = args["public"].as_bool().unwrap_or(false);
             let memory = args["memory"].as_str().map(|s| s.to_string());
             let cpu_cores = args["cpu_cores"].as_u64();
+            let replace = args["replace"].as_bool().unwrap_or(false);
             let readiness_timeout = args["readiness_timeout_secs"].as_u64().unwrap_or(120);
 
             let env: HashMap<String, String> = args["env"]
@@ -1348,6 +1356,7 @@ async fn handle_tool_call(
                 public,
                 memory.as_deref(),
                 cpu_cores,
+                replace,
             )
             .await?;
 

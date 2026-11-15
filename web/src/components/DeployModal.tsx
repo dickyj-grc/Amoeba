@@ -26,8 +26,10 @@ import {
 } from '../lib/deployPackage';
 import { api } from '../api/client';
 import { libraryMatch } from '../lib/library';
-import { LibraryEntry } from '../types/amoeba';
+import { describeSource, freeName, isSameApp } from '../lib/settings';
+import { LibraryEntry, ServiceItem } from '../types/amoeba';
 import { LibraryDeploy } from './LibraryDeploy';
+import { NameConflict } from './SettingsFields';
 
 /** Offers the library setup when a typed image or repo is a known app. */
 const KnownAppHint: React.FC<{ entry?: LibraryEntry; onUse: (id: string) => void }> = ({ entry, onUse }) =>
@@ -51,18 +53,22 @@ interface DeployModalProps {
   isOpen: boolean;
   onClose: () => void;
   onDeploySuccess: () => void;
+  /** Installed services, to catch a name already in use. */
+  services: ServiceItem[];
 }
 
 export const DeployModal: React.FC<DeployModalProps> = ({
   isOpen,
   onClose,
   onDeploySuccess,
+  services,
 }) => {
   const [activeTab, setActiveTab] = useState<'library' | 'git' | 'dockerfile' | 'image'>('library');
   // The app library, loaded when the dialog opens; null until then.
   const [library, setLibrary] = useState<LibraryEntry[] | null>(null);
   const [libraryPick, setLibraryPick] = useState<string | undefined>(undefined);
   const [name, setName] = useState('');
+  const [replace, setReplace] = useState(false);
   const [gitUrl, setGitUrl] = useState('');
   const [dockerImage, setDockerImage] = useState('');
   const [dockerfileContent, setDockerfileContent] = useState(
@@ -121,6 +127,10 @@ export const DeployModal: React.FC<DeployModalProps> = ({
 
   if (!isOpen) return null;
 
+  const existing = services.find((s) => s.name === name.trim());
+  // Redeploying from these tabs updates a service they deployed before.
+  const sameApp = isSameApp(existing, { kind: 'package' });
+
   const handleStopBuild = async () => {
     setStopping(true);
     const token = sessionStorage.getItem('amoeba_token') || localStorage.getItem('amoeba_token');
@@ -152,6 +162,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     const nameError = validateServiceName(name.trim());
     if (nameError) {
       setError(nameError);
+      return;
+    }
+    // Checked before a build, which can take minutes.
+    if (existing && !sameApp && !replace) {
+      setError(`Choose another name, or replace ${existing.name}.`);
       return;
     }
 
@@ -188,6 +203,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         isPublic,
         localUpstream,
         envPairs,
+        replace: Boolean(existing),
       });
 
       const res = await fetch('/admin/apps', {
@@ -295,6 +311,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
           <LibraryDeploy
             entries={library}
             initialId={libraryPick}
+            services={services}
             onDeployed={() => {
               onDeploySuccess();
               onClose();
@@ -324,7 +341,10 @@ export const DeployModal: React.FC<DeployModalProps> = ({
               <input
                 type="text"
                 value={name}
-                onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+                onChange={(e) => {
+                  setName(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''));
+                  setReplace(false);
+                }}
                 placeholder="e.g. pdf-parser, ai-search"
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                 required
@@ -332,6 +352,23 @@ export const DeployModal: React.FC<DeployModalProps> = ({
               <p className="mt-1 text-[11px] text-muted-foreground">
                 Reachable at <code className="text-blue-400">/v1/{name || '<name>'}/</code>
               </p>
+              {existing && (
+                <div className="mt-2">
+                  <NameConflict
+                    name={existing.name}
+                    existing={existing}
+                    sameApp={sameApp}
+                    from={describeSource(existing.source)}
+                    replace={replace}
+                    suggestion={freeName(name.trim(), services.map((s) => s.name))}
+                    onReplace={() => setReplace(true)}
+                    onRename={(n) => {
+                      setName(n);
+                      setReplace(false);
+                    }}
+                  />
+                </div>
+              )}
             </div>
 
             <div>

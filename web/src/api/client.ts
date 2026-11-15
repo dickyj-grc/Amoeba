@@ -1,4 +1,5 @@
 import {
+  AppSettings,
   AppsListResponse,
   AppStatusResponse,
   IssuedToken,
@@ -129,10 +130,18 @@ class AmoebaApiClient {
     return this.request<LibraryEntry[]>('/admin/library');
   }
 
-  /** Installs a library app; `name` and `public` override the app's own. */
+  /** Installs a library app; `name` and `public` override the app's own.
+   *  `replace` allows a name already in use; `overrides` adjust its settings. */
   public async installFromLibrary(
     id: string,
-    options: { name?: string; public?: boolean; env?: Record<string, string>; secrets?: Record<string, string> },
+    options: {
+      name?: string;
+      public?: boolean;
+      env?: Record<string, string>;
+      secrets?: Record<string, string>;
+      replace?: boolean;
+      overrides?: AppSettings;
+    },
   ): Promise<void> {
     await this.request(`/admin/library/${encodeURIComponent(id)}/install`, {
       method: 'POST',
@@ -141,7 +150,17 @@ class AmoebaApiClient {
         public: options.public,
         env: options.env ?? {},
         secrets: options.secrets ?? {},
+        replace: options.replace ?? false,
+        ...(options.overrides && Object.keys(options.overrides).length > 0 ? { overrides: options.overrides } : {}),
       }),
+    });
+  }
+
+  /** Changes an installed app's settings; they are kept when it is upgraded. */
+  public async updateSettings(name: string, settings: AppSettings): Promise<AppStatusResponse> {
+    return this.request<AppStatusResponse>(`/admin/apps/${encodeURIComponent(name)}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify(settings),
     });
   }
 

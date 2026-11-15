@@ -19,6 +19,8 @@ export interface DeployInput {
   /** Call the app as a local client: no Origin, Host localhost (e.g. MCP servers). */
   localUpstream?: boolean;
   envPairs: EnvPair[];
+  /** Install over a service that already has this name. */
+  replace?: boolean;
 }
 
 export interface InstallValues {
@@ -81,7 +83,7 @@ export function buildDeployForm(input: DeployInput): FormData {
   const zip = buildZip([{ name: 'amoeba.yaml', data: new TextEncoder().encode(manifest) }]);
   const form = new FormData();
   form.append('package', new Blob([zip], { type: 'application/zip' }), `${input.name}.zip`);
-  form.append('values', JSON.stringify(values));
+  form.append('values', JSON.stringify(input.replace ? { ...values, replace: true } : values));
   return form;
 }
 
