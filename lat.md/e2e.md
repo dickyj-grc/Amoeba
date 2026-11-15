@@ -2,6 +2,12 @@
 
 The nightly e2e provisions a DigitalOcean droplet, starts Amoeba there with Docker Compose, and runs `scripts/e2e/` against it over HTTP.
 
+## Droplet regions
+
+DigitalOcean intermittently refuses a droplet with 422 when a region can't take the size, which failed whole nightlies before any test ran.
+
+[[scripts/e2e/do_client.py#DigitalOceanClient#create_droplet]] tries the regions in `DO_REGIONS` (default `nyc3,nyc1,sfo3,tor1`) in turn on a 422, prints DigitalOcean's reason for each refusal, and lists them all if every region refuses. `DO_REGION` pins one region.
+
 ## What runs on the droplet
 
 The droplet must run the same commit as the tests, or a branch run checks new tests against an old server.

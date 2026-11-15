@@ -1,15 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Check, Rocket, Search } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, ChevronRight, Rocket, Search } from 'lucide-react';
 import { api } from '../api/client';
-import { LibraryEntry, LibraryField } from '../types/amoeba';
+import { AppSettings, LibraryEntry, LibraryField, ServiceItem } from '../types/amoeba';
 import { interfaceLabel, searchLibrary } from '../lib/library';
 import { validateServiceName } from '../lib/deployPackage';
+import {
+  changedSettings,
+  describeSource,
+  freeName,
+  isSameApp,
+  renameTokenRole,
+  SettingsDraft,
+  toDraft,
+} from '../lib/settings';
+import { NameConflict, SettingsFields } from './SettingsFields';
 
 interface LibraryDeployProps {
   /** null while the library is loading. */
   entries: LibraryEntry[] | null;
   /** App to start with, e.g. from the Docker Image tab's "known app" hint. */
   initialId?: string;
+  /** Installed services, to catch a name already in use. */
+  services: ServiceItem[];
   onDeployed: () => void;
   onCancel: () => void;
 }
@@ -51,7 +63,18 @@ const EnvInput: React.FC<{
 
 /** The App library tab: search ready-made apps, then deploy one with only the
  *  inputs it needs. Image, command, port and permissions come from the app. */
-export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId, onDeployed, onCancel }) => {
+/** The app's own settings, as the "Adjust" form starts. */
+function librarySettings(entry: LibraryEntry): AppSettings {
+  return {
+    permissions: entry.permissions,
+    public: entry.public,
+    memory: entry.memory,
+    cpu_cores: entry.cpu_cores,
+    cooldown_seconds: entry.cooldown_seconds ?? 0,
+  };
+}
+
+export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId, services, onDeployed, onCancel }) => {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<LibraryEntry | null>(null);
   const [name, setName] = useState('');
@@ -60,6 +83,9 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [adjusting, setAdjusting] = useState(false);
+  const [draft, setDraft] = useState<SettingsDraft | null>(null);
+  const [replace, setReplace] = useState(false);
 
   const select = (entry: LibraryEntry) => {
     setSelected(entry);
@@ -68,6 +94,9 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
     setIsPublic(entry.public);
     setEnv(Object.fromEntries(Object.entries(entry.env).map(([k, f]) => [k, f.default ?? ''])));
     setSecrets(Object.fromEntries(Object.keys(entry.secrets).map((k) => [k, ''])));
+    setDraft(toDraft(librarySettings(entry)));
+    setAdjusting(false);
+    setReplace(false);
     setError(null);
   };
 
@@ -77,6 +106,8 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
   }, [initialId, entries]);
 
   const results = entries ? searchLibrary(entries, selected ? '' : query) : [];
+  const existing = services.find((s) => s.name === name.trim());
+  const sameApp = selected ? isSameApp(existing, { kind: 'library', id: selected.id }) : false;
 
   const handleDeploy = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,12 +117,28 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
       setError(nameError);
       return;
     }
+    if (existing && !sameApp && !replace) {
+      setError(`Choose another name, or replace ${existing.name}.`);
+      return;
+    }
+    let overrides: AppSettings = {};
+    try {
+      // Public has its own checkbox; the form only adds adjustments.
+      const base = librarySettings(selected);
+      overrides = draft ? changedSettings(base, { ...draft, public: base.public ?? false }) : {};
+      overrides = renameTokenRole(overrides, selected.default_name, name.trim());
+    } catch (err: any) {
+      setError(err.message);
+      return;
+    }
     setIsSubmitting(true);
     setError(null);
     try {
       await api.installFromLibrary(selected.id, {
         name: name.trim(),
         public: isPublic,
+        replace: Boolean(existing),
+        overrides,
         // Unset optional env vars fall back to the app's defaults.
         env: Object.fromEntries(Object.entries(env).filter(([, v]) => v !== '')),
         secrets: Object.fromEntries(Object.entries(secrets).filter(([, v]) => v !== '')),
@@ -219,7 +266,16 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
               <label className="block font-medium text-foreground mb-1">
                 Service Name <span className="text-red-400">*</span>
               </label>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputClass} required />
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setReplace(false);
+                }}
+                className={inputClass}
+                required
+              />
               <p className="mt-1 text-[10px] text-muted-foreground">Reachable at /v1/{name || '<name>'}/</p>
             </div>
             <div className="flex items-center pt-5">
@@ -234,6 +290,44 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
               </label>
             </div>
           </div>
+
+          {existing && (
+            <NameConflict
+              name={existing.name}
+              existing={existing}
+              sameApp={sameApp}
+              from={describeSource(existing.source)}
+              replace={replace}
+              suggestion={freeName(name.trim(), services.map((s) => s.name))}
+              onReplace={() => setReplace(true)}
+              onRename={(n) => {
+                setName(n);
+                setReplace(false);
+              }}
+            />
+          )}
+
+          {draft && (
+            <div className="rounded-md border border-border">
+              <button
+                type="button"
+                onClick={() => setAdjusting(!adjusting)}
+                className="flex w-full items-center gap-1.5 px-3 py-2 text-left font-medium text-foreground hover:bg-secondary/40"
+              >
+                {adjusting ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                Adjust
+                <span className="font-normal text-muted-foreground">who can call it, memory, idle stop</span>
+              </button>
+              {adjusting && (
+                <div className="border-t border-border p-3">
+                  <SettingsFields draft={draft} onChange={setDraft} showPublic={false} />
+                  <p className="mt-2 text-[10px] text-muted-foreground">
+                    You can change these later with the service's Settings button.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {(Object.keys(selected.env).length > 0 || Object.keys(selected.secrets).length > 0) && (
             <div className="space-y-3 pt-2 border-t border-border">
@@ -294,7 +388,15 @@ export const LibraryDeploy: React.FC<LibraryDeployProps> = ({ entries, initialId
           className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           <Rocket className="h-3.5 w-3.5" />
-          <span>{isSubmitting ? 'Deploying...' : 'Deploy to Amoeba'}</span>
+          <span>
+            {isSubmitting
+              ? 'Deploying...'
+              : existing && sameApp
+                ? `Upgrade ${existing.name}`
+                : existing && replace
+                  ? `Replace ${existing.name}`
+                  : 'Deploy to Amoeba'}
+          </span>
         </button>
       </div>
     </form>

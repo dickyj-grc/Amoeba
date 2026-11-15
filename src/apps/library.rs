@@ -131,6 +131,15 @@ pub struct LibraryEntry {
     pub port: u16,
     pub public: bool,
     pub local_upstream: bool,
+    /// Defaults for the console's "Adjust" form.
+    pub permissions: BTreeMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<u64>,
+    /// Idle seconds before it stops; absent keeps it running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interface: Option<AppInterface>,
     pub env: BTreeMap<String, LibraryField>,
@@ -178,6 +187,14 @@ fn describe(entry: IndexEntry) -> Option<LibraryEntry> {
         port: manifest.placement.port,
         public: manifest.public,
         local_upstream: manifest.local_upstream,
+        permissions: manifest
+            .permissions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        memory: manifest.resources.as_ref().and_then(|r| r.memory.clone()),
+        cpu_cores: manifest.resources.as_ref().and_then(|r| r.cpu_cores),
+        cooldown_seconds: manifest.placement.cooldown_seconds,
         interface: manifest.interface.clone(),
         env: manifest
             .schema

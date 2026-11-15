@@ -5,6 +5,7 @@ import { DeployModal } from './components/DeployModal';
 import { LoginModal } from './components/LoginModal';
 import { Navbar } from './components/Navbar';
 import { ServicesTable } from './components/ServicesTable';
+import { ServiceSettingsModal } from './components/ServiceSettingsModal';
 import { ServiceTokenModal } from './components/ServiceTokenModal';
 import { StatsCards } from './components/StatsCards';
 import { TestEndpointModal } from './components/TestEndpointModal';
@@ -22,6 +23,7 @@ export const App: React.FC = () => {
   const [isCliOpen, setIsCliOpen] = useState<boolean>(false);
   const [selectedTestService, setSelectedTestService] = useState<ServiceItem | null>(null);
   const [selectedTokenService, setSelectedTokenService] = useState<string | null>(null);
+  const [settingsService, setSettingsService] = useState<ServiceItem | null>(null);
   const inFlight = useRef(false);
 
   const fetchServices = async (options: { silent?: boolean } = {}) => {
@@ -99,6 +101,7 @@ export const App: React.FC = () => {
           onUninstall={handleUninstall}
           onTestEndpoint={(s) => setSelectedTestService(s)}
           onIssueToken={(name) => setSelectedTokenService(name)}
+          onOpenSettings={(s) => setSettingsService(s)}
         />
       </main>
 
@@ -119,6 +122,7 @@ export const App: React.FC = () => {
         isOpen={isDeployOpen}
         onClose={() => setIsDeployOpen(false)}
         onDeploySuccess={() => fetchServices()}
+        services={services}
       />
 
       <TestEndpointModal
@@ -132,6 +136,13 @@ export const App: React.FC = () => {
         serviceName={selectedTokenService}
         mcpPath={services.find((s) => s.name === selectedTokenService)?.interface?.path}
         onClose={() => setSelectedTokenService(null)}
+      />
+
+      <ServiceSettingsModal
+        key={settingsService?.name ?? 'none'}
+        service={settingsService}
+        onClose={() => setSettingsService(null)}
+        onSaved={() => fetchServices()}
       />
 
       <CliInfoModal

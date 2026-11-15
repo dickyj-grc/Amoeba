@@ -10,7 +10,7 @@ use crate::apps::manager::{AppManager, AppManagerError, spawn_readiness_probe};
 use crate::apps::schema::{InstallValues, PolicyPatch};
 use crate::apps::state::{AppLifecycleSnapshot, AppLifecycleState};
 use crate::auth::issued::{IssuedToken, now_secs};
-use crate::config::schema::AppInterface;
+use crate::config::schema::{AppInterface, AppOverrides, AppSource};
 use crate::routing::operation::scoped_role;
 use crate::state::AppState;
 use axum::{
@@ -69,6 +69,11 @@ pub async fn install_app(
         "missing 'package' field".to_string(),
     ))?;
 
+    values.source = Some(AppSource {
+        kind: "package".into(),
+        id: None,
+        version: None,
+    });
     install_package(&state, &package_bytes, values).await
 }
 
@@ -144,7 +149,13 @@ pub async fn install_from_library(
         };
         (status, e)
     })?;
-    install_package(&state, &package, body.values).await
+    let mut values = body.values;
+    values.source = Some(AppSource {
+        kind: "library".into(),
+        id: Some(id),
+        version: None,
+    });
+    install_package(&state, &package, values).await
 }
 
 #[derive(Serialize)]
@@ -168,6 +179,15 @@ pub struct AppStatusResponse {
     /// How to call the app, from its package.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interface: Option<AppInterface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AppSource>,
+    /// Current permissions, public, memory, CPU and idle time, every field
+    /// set; what `PATCH /admin/apps/<name>/settings` changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<AppOverrides>,
+    /// The settings changed from the manifest's, kept across reinstalls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<AppOverrides>,
 }
 
 /// What the gateway knows about the running workload.
@@ -226,6 +246,9 @@ fn app_status(state: &AppState, app_name: String) -> AppStatusResponse {
         name: app_name,
         state: snapshot,
         runtime,
+        settings: service.as_ref().map(AppOverrides::current),
+        source: service.as_ref().and_then(|s| s.source.clone()),
+        overrides: service.as_ref().and_then(|s| s.overrides.clone()),
         interface: service.and_then(|s| s.interface),
     }
 }
@@ -242,9 +265,7 @@ pub async fn uninstall_app(
     reload_catalog(&state);
 
     // Remove the lifecycle state so the app no longer appears ready.
-    let mut new_states = (*state.app_states.load().clone()).clone();
-    new_states.remove(&app_name);
-    state.app_states.store(Arc::new(new_states));
+    state.remove_app_state(&app_name);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -261,6 +282,43 @@ pub async fn update_app_policy(
         .map_err(map_manager_error)?;
     reload_catalog(&state);
     Ok(Json(app_status(&state, app_name)))
+}
+
+/// Changes an app's settings. Memory and CPU need a new container, so a
+/// running one is stopped; the next request starts it with the new limits.
+pub async fn update_app_settings(
+    State(state): State<Arc<AppState>>,
+    Path(app_name): Path<String>,
+    Json(settings): Json<AppOverrides>,
+) -> Result<Json<AppStatusResponse>, (StatusCode, String)> {
+    let manager = app_manager(&state);
+    let restart = manager
+        .update_settings(&app_name, settings)
+        .await
+        .map_err(map_manager_error)?;
+    reload_catalog(&state);
+    if restart {
+        restart_on_next_request(&state, &app_name).await;
+    }
+    Ok(Json(app_status(&state, app_name)))
+}
+
+/// Stops the app's container, if running, so the next request starts it
+/// again (recreated, since its spec changed).
+async fn restart_on_next_request(state: &AppState, app_name: &str) {
+    let driver = state.drivers.load().get(app_name).cloned();
+    let runtime = state.runtime_states.load().get(app_name).cloned();
+    let (Some(driver), Some(runtime)) = (driver, runtime) else {
+        return;
+    };
+    if runtime.is_running() == Some(false) {
+        return;
+    }
+    match driver.stop().await {
+        // The proxy starts a workload it knows is stopped on the next request.
+        Ok(()) => runtime.mark_stopped(),
+        Err(e) => tracing::warn!(app = %app_name, "settings saved but stop failed: {e}"),
+    }
 }
 
 /// Default lifetime of a service token, kept short for one-off testing.
@@ -549,7 +607,7 @@ fn app_manager(state: &AppState) -> AppManager {
 fn map_manager_error(e: AppManagerError) -> (StatusCode, String) {
     match e {
         AppManagerError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
-        AppManagerError::Quota(msg) => (StatusCode::CONFLICT, msg),
+        AppManagerError::Quota(msg) | AppManagerError::Conflict(msg) => (StatusCode::CONFLICT, msg),
         AppManagerError::Zip(_) | AppManagerError::Yaml(_) | AppManagerError::Json(_) => {
             (StatusCode::BAD_REQUEST, e.to_string())
         }

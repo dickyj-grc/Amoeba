@@ -414,6 +414,146 @@ pub struct ServiceConfig {
     /// How to call the service; from the app package, for the console.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<AppInterface>,
+    /// Where the app was installed from, so a reinstall can tell an upgrade
+    /// of the same app from a different app taking its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AppSource>,
+    /// Site settings layered over the app's manifest. Kept when the same app
+    /// is reinstalled or upgraded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<AppOverrides>,
+}
+
+/// Where an installed app came from.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct AppSource {
+    /// `library` for the app library; `package` for an uploaded package,
+    /// including the console's Docker Image, Git and Dockerfile tabs.
+    pub kind: String,
+    /// The library app's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The manifest's `version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl AppSource {
+    /// Same app, possibly another version.
+    pub fn same_app(&self, other: &AppSource) -> bool {
+        self.kind == other.kind && self.id == other.id
+    }
+
+    /// For messages, e.g. "the app library's lightpanda-mcp 1.0.0".
+    pub fn describe(&self) -> String {
+        let version = self
+            .version
+            .as_deref()
+            .map(|v| format!(" {v}"))
+            .unwrap_or_default();
+        match (self.kind.as_str(), &self.id) {
+            ("library", Some(id)) => format!("the app library's {id}{version}"),
+            _ => format!("an uploaded package{version}"),
+        }
+    }
+}
+
+/// How a site runs an app, as opposed to what the app is: who may call it,
+/// its memory and CPU, and when it idles. Set at install or later, and
+/// applied over the manifest. Unset fields keep the manifest's value.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    /// e.g. `512Mi`, `2Gi`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<u64>,
+    /// Idle seconds before the app is stopped; `0` keeps it running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_seconds: Option<u64>,
+}
+
+impl AppOverrides {
+    pub fn is_empty(&self) -> bool {
+        self == &AppOverrides::default()
+    }
+
+    /// Fields set in `newer` replace this one's.
+    pub fn merge(&mut self, newer: AppOverrides) {
+        if newer.permissions.is_some() {
+            self.permissions = newer.permissions;
+        }
+        if newer.public.is_some() {
+            self.public = newer.public;
+        }
+        if newer.memory.is_some() {
+            self.memory = newer.memory;
+        }
+        if newer.cpu_cores.is_some() {
+            self.cpu_cores = newer.cpu_cores;
+        }
+        if newer.cooldown_seconds.is_some() {
+            self.cooldown_seconds = newer.cooldown_seconds;
+        }
+    }
+
+    /// Writes the set fields into `service`.
+    pub fn apply(&self, service: &mut ServiceConfig) -> Result<(), String> {
+        if let Some(permissions) = &self.permissions {
+            service.permissions = permissions.clone();
+        }
+        if let Some(public) = self.public {
+            service.public = public;
+        }
+        if let Some(seconds) = self.cooldown_seconds {
+            service.placement.cooldown_seconds = (seconds > 0).then_some(seconds);
+        }
+        if self.memory.is_none() && self.cpu_cores.is_none() {
+            return Ok(());
+        }
+        let container = service
+            .container
+            .as_mut()
+            .ok_or("memory and CPU can only be changed for single-image apps")?;
+        let limits = &mut container
+            .resources
+            .get_or_insert_with(|| ContainerResources {
+                limits: ResourceQuantities::default(),
+            })
+            .limits;
+        if let Some(memory) = &self.memory {
+            let mb = parse_quantity_to_mb(memory).map_err(|e| format!("invalid memory: {e}"))?;
+            if mb == 0 {
+                return Err("memory must be more than 0".into());
+            }
+            limits.memory = Some(Quantity(mb));
+        }
+        if let Some(cpu) = self.cpu_cores {
+            limits.cpu_cores = (cpu > 0).then_some(cpu);
+        }
+        Ok(())
+    }
+
+    /// A service's current settings, every field set, for the console's form.
+    pub fn current(service: &ServiceConfig) -> AppOverrides {
+        let limits = service
+            .container
+            .as_ref()
+            .and_then(|c| c.resources.as_ref())
+            .map(|r| &r.limits);
+        AppOverrides {
+            permissions: Some(service.permissions.clone()),
+            public: Some(service.public),
+            memory: limits.and_then(|l| l.memory).map(|q| format!("{}Mi", q.0)),
+            cpu_cores: limits.and_then(|l| l.cpu_cores),
+            cooldown_seconds: Some(service.placement.cooldown_seconds.unwrap_or(0)),
+        }
+    }
 }
 
 impl ServiceConfig {

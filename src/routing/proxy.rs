@@ -351,8 +351,10 @@ pub async fn proxy_handler(
     // A fresh activation: 5.5 gate against the machine's declared capacity
     // budget, then (Container Boot Check) make sure the driver has actually
     // started the service and wait for it to accept connections, before ever
-    // attempting to proxy to it.
-    if !was_already_occupying {
+    // attempting to proxy to it. A workload the gateway stopped also needs a
+    // start, even one that counts as occupying, such as an always-on service
+    // restarted for a settings change.
+    if !was_already_occupying || runtime.is_running() == Some(false) {
         let capacity_rejected = {
             let catalog = state.catalog.load();
             let runtimes = state.runtime_states.load();
@@ -571,6 +573,8 @@ mod tests {
             header_from_secret: HashMap::new(),
             local_upstream: false,
             interface: None,
+            source: None,
+            overrides: None,
         }
     }
 

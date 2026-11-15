@@ -26,6 +26,14 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _error_message(resp: requests.Response) -> str:
+    """DigitalOcean's reason for a refused request, e.g. a size not available in a region."""
+    try:
+        return resp.json().get("message") or resp.text
+    except ValueError:
+        return resp.text
+
+
 def env(name: str, default: str | None = None) -> str:
     value = os.environ.get(name, default)
     if value is None:
@@ -82,24 +90,45 @@ class DigitalOceanClient:
         size: str | None = None,
         image: str | None = None,
     ) -> int:
-        """Create the droplet and return its ID."""
-        payload: dict[str, Any] = {
-            "name": name,
-            "region": region or env("DO_REGION", "nyc3"),
-            "size": size or env("DO_SIZE", "s-4vcpu-8gb"),
-            "image": image or env("DO_IMAGE", "ubuntu-24-04-x64"),
-            "ssh_keys": [ssh_key_id],
-            "user_data": user_data,
-            "backups": False,
-            "ipv6": False,
-            "monitoring": False,
-            "tags": ["amoeba-e2e"],
-        }
-        resp = self.session.post(f"{DO_API}/droplets", json=payload)
-        resp.raise_for_status()
-        droplet_id = resp.json()["droplet"]["id"]
-        print(f"Created droplet '{name}' id={droplet_id}")
-        return droplet_id
+        """Create the droplet and return its ID.
+
+        DigitalOcean answers 422 when a region can't take the size right now,
+        which made nightlies fail intermittently. On a 422 the next region in
+        DO_REGIONS is tried; every refusal's reason is printed and kept in the
+        final error, since `raise_for_status` alone hides it.
+        """
+        regions = [region] if region else [
+            r.strip() for r in env("DO_REGIONS", env("DO_REGION", "nyc3,nyc1,sfo3,tor1")).split(",") if r.strip()
+        ]
+        refusals: list[str] = []
+        for candidate in regions:
+            payload: dict[str, Any] = {
+                "name": name,
+                "region": candidate,
+                "size": size or env("DO_SIZE", "s-4vcpu-8gb"),
+                "image": image or env("DO_IMAGE", "ubuntu-24-04-x64"),
+                "ssh_keys": [ssh_key_id],
+                "user_data": user_data,
+                "backups": False,
+                "ipv6": False,
+                "monitoring": False,
+                "tags": ["amoeba-e2e"],
+            }
+            resp = self.session.post(f"{DO_API}/droplets", json=payload)
+            if resp.status_code == 422:
+                reason = _error_message(resp)
+                print(f"DigitalOcean refused a droplet in {candidate}: {reason}")
+                refusals.append(f"{candidate}: {reason}")
+                continue
+            if not resp.ok:
+                raise requests.HTTPError(
+                    f"{resp.status_code} creating droplet in {candidate}: {_error_message(resp)}",
+                    response=resp,
+                )
+            droplet_id = resp.json()["droplet"]["id"]
+            print(f"Created droplet '{name}' id={droplet_id} in {candidate}")
+            return droplet_id
+        raise RuntimeError("DigitalOcean refused the droplet in every region: " + "; ".join(refusals))
 
     def wait_for_droplet(self, droplet_id: int, timeout: int = 300) -> str:
         """Poll until the droplet is active and return its public IPv4."""

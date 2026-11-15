@@ -7,6 +7,7 @@ import {
   Play,
   RefreshCw,
   Search,
+  Settings,
   Trash2,
 } from 'lucide-react';
 import { ServiceItem } from '../types/amoeba';
@@ -19,6 +20,7 @@ interface ServicesTableProps {
   onUninstall: (name: string) => Promise<void>;
   onTestEndpoint: (service: ServiceItem) => void;
   onIssueToken: (serviceName: string) => void;
+  onOpenSettings: (service: ServiceItem) => void;
 }
 
 export const ServicesTable: React.FC<ServicesTableProps> = ({
@@ -27,6 +29,7 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
   onRefresh,
   onUninstall,
   onTestEndpoint,
+  onOpenSettings,
   onIssueToken,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -230,6 +233,14 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
                       >
                         <Key className="h-3 w-3 text-blue-400" />
                         <span>Token</span>
+                      </button>
+
+                      <button
+                        onClick={() => onOpenSettings(service)}
+                        className="inline-flex items-center px-2 py-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground text-xs transition-colors"
+                        title="Settings: who can call it, memory, idle stop"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
                       </button>
 
                       <button

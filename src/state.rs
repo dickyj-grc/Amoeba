@@ -133,23 +133,35 @@ impl AppState {
 
     /// Swaps in a new catalog, adding runtime and lifecycle state for new
     /// services and rebuilding drivers.
+    ///
+    /// The state maps are updated with `rcu`, which retries on a concurrent
+    /// write. A plain load-then-store here raced the install handler: the
+    /// catalog watcher's reload could write back a map from just before
+    /// `set_app_state`, so the readiness probe updated a state no request
+    /// read, and the app looked "installed" forever.
     fn apply_catalog(&self, new_catalog: ServiceCatalog) {
-        let mut new_runtimes = (*self.runtime_states.load().clone()).clone();
-        let mut new_app_states = (*self.app_states.load().clone()).clone();
-        for key in new_catalog.services.keys() {
-            new_runtimes
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(ServiceRuntimeState::new()));
-            new_app_states
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(AppLifecycleState::installed()));
-        }
+        self.runtime_states.rcu(|current| {
+            let mut runtimes = (**current).clone();
+            for key in new_catalog.services.keys() {
+                runtimes
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(ServiceRuntimeState::new()));
+            }
+            runtimes
+        });
+        self.app_states.rcu(|current| {
+            let mut states = (**current).clone();
+            for key in new_catalog.services.keys() {
+                states
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(AppLifecycleState::installed()));
+            }
+            states
+        });
 
         let new_drivers = driver::build_all(&new_catalog, &self.config_dir, self.docker.clone());
 
         self.catalog.store(Arc::new(new_catalog));
-        self.runtime_states.store(Arc::new(new_runtimes));
-        self.app_states.store(Arc::new(new_app_states));
         self.drivers.store(Arc::new(new_drivers));
     }
 }
@@ -162,9 +174,20 @@ impl AppState {
 
     /// Set or replace the lifecycle state for a service.
     pub fn set_app_state(&self, name: &str, app_state: Arc<AppLifecycleState>) {
-        let mut new_states = (*self.app_states.load().clone()).clone();
-        new_states.insert(name.to_string(), app_state);
-        self.app_states.store(Arc::new(new_states));
+        self.app_states.rcu(|current| {
+            let mut states = (**current).clone();
+            states.insert(name.to_string(), app_state.clone());
+            states
+        });
+    }
+
+    /// Forgets an uninstalled app's lifecycle state.
+    pub fn remove_app_state(&self, name: &str) {
+        self.app_states.rcu(|current| {
+            let mut states = (**current).clone();
+            states.remove(name);
+            states
+        });
     }
 
     /// Return serializable snapshots of all tracked app states.

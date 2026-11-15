@@ -12,7 +12,7 @@ use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::apps_admin::{
     build_app_image, build_status, cancel_build, get_app_status, get_library_entry, install_app,
     install_from_library, issue_service_token, list_apps, list_library, list_service_tokens,
-    revoke_service_token, uninstall_app, update_app_policy,
+    revoke_service_token, uninstall_app, update_app_policy, update_app_settings,
 };
 use amoeba::routing::auth::{login, revoke};
 use amoeba::routing::proxy::{proxy_handler, proxy_handler_root};
@@ -142,6 +142,10 @@ async fn main() {
             axum::routing::get(get_app_status)
                 .patch(update_app_policy)
                 .delete(uninstall_app),
+        )
+        .route(
+            "/apps/:name/settings",
+            axum::routing::patch(update_app_settings),
         )
         .route(
             "/apps/:name/build",
