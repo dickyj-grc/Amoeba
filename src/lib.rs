@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod auth;
+pub mod bootstrap;
 pub mod capacity;
 pub mod config;
 pub mod lifecycle;

@@ -3,6 +3,7 @@ use amoeba::auth::jwt::local_engine_with_revocation;
 use amoeba::auth::middleware::{require_admin_role, unified_auth_middleware};
 use amoeba::auth::revocation::RevocationStore;
 use amoeba::auth::{AuthMode, JwtEngine};
+use amoeba::bootstrap;
 use amoeba::config::settings::{
     AUTH_MODE_JWKS, AUTH_MODE_LOCAL_JWT, AmoebaConfig, AuthSettings, DEFAULT_BIND_ADDR,
     DEFAULT_CONFIG_PATH, DEFAULT_REVOCATION_FILE, DEFAULT_SERVICES_FILE, DEFAULT_USERS_FILE,
@@ -24,6 +25,7 @@ use axum::{
 use jsonwebtoken::{Algorithm, Validation};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn};
 
 /// Algorithms accepted for tokens verified against a JWKS endpoint. The exact
@@ -116,6 +118,9 @@ async fn main() {
     // native (non-container) run keep its catalog outside /etc/amoeba.
     let services_file =
         std::env::var("AMOEBA_SERVICES_FILE").unwrap_or_else(|_| DEFAULT_SERVICES_FILE.to_string());
+    if bootstrap::enabled() {
+        first_run(&config, &services_file);
+    }
     let app_state = AppState::new(
         &services_file,
         &config.auth.users_file,
@@ -190,10 +195,51 @@ async fn main() {
         .nest("/auth", auth_routes)
         .with_state(app_state);
 
+    // The web console, when the image ships it, at every path the API doesn't use.
+    let console_dir =
+        std::env::var("AMOEBA_CONSOLE_DIR").unwrap_or_else(|_| "/app/console".to_string());
+    let index = std::path::Path::new(&console_dir).join("index.html");
+    let app = if index.is_file() {
+        info!("serving the web console from {console_dir}");
+        app.fallback_service(ServeDir::new(&console_dir).fallback(ServeFile::new(index)))
+    } else {
+        app
+    };
+
     let bind_addr = config.server.bind_addr;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     info!("🚀 Amoeba Compute Orchestrator running on http://{bind_addr}");
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Sets up what the quick start needs on first run: an admin user and an
+/// empty catalog. Exits when it cannot, since the server would be unusable.
+fn first_run(config: &AmoebaConfig, services_file: &str) {
+    if config.auth.mode == AUTH_MODE_LOCAL_JWT {
+        let users_file = &config.auth.users_file;
+        let dir = std::path::Path::new(users_file)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        match bootstrap::ensure_admin(users_file, dir) {
+            Ok(Some(password)) => warn!(
+                "first run: created user 'admin' with password {password} (also in {}); sign in and change it",
+                dir.join(bootstrap::ADMIN_PASSWORD_FILE).display()
+            ),
+            Ok(None) => {}
+            Err(e) => {
+                error!("first run: could not create the admin user: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    match bootstrap::ensure_catalog(services_file) {
+        Ok(true) => info!("first run: created an empty service catalog at {services_file}"),
+        Ok(false) => {}
+        Err(e) => {
+            error!("first run: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Loads `config.toml` (path from `AMOEBA_CONFIG`, default
@@ -213,11 +259,23 @@ fn load_settings() -> Result<AmoebaConfig, String> {
     warn!(
         "{config_path} not found; falling back to environment-based defaults (local_jwt mode, fixed paths)"
     );
-    let jwt_secret = std::env::var("AMOEBA_LOCAL_JWT_SECRET").map_err(|_| {
-        "AMOEBA_LOCAL_JWT_SECRET is not set and no config file was found; \
-         refusing to start with an insecure default secret"
-            .to_string()
-    })?;
+    let jwt_secret = match std::env::var("AMOEBA_LOCAL_JWT_SECRET") {
+        Ok(secret) => secret,
+        // The quick start opts in to a generated secret kept with the state.
+        Err(_) if bootstrap::enabled() => {
+            let dir = std::path::Path::new(DEFAULT_USERS_FILE)
+                .parent()
+                .expect("an absolute path");
+            bootstrap::jwt_secret(dir)?
+        }
+        Err(_) => {
+            return Err(
+                "AMOEBA_LOCAL_JWT_SECRET is not set and no config file was found; \
+                 refusing to start with an insecure default secret"
+                    .to_string(),
+            );
+        }
+    };
 
     Ok(AmoebaConfig {
         server: ServerSettings {

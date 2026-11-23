@@ -29,3 +29,19 @@ Apple containers get a new IP on every start, so the loader rejects `placement.i
 The orchestrator runs in Docker Compose with `docker-compose.dev.yml`, which publishes only the orchestrator on `127.0.0.1:8064` (no Caddy). Inside the container it still listens on 8080.
 
 By default it pulls `ghcr.io/dickyj-grc/amoeba:latest`. That image is `linux/amd64` only, so Apple Silicon runs it emulated; `--build` builds a native image from the checkout instead.
+
+## Quick start
+
+`docker-compose.quickstart.yml` runs the published image on port 8080 with the web console, so a first-time user needs one `docker compose up` and no checkout.
+
+The compose file can be piped to `docker compose -p amoeba -f - up -d`, so the README gives one command. State lives in the `amoeba-data` volume, apps join the `amoeba-net` network by name, and the Docker socket lets Amoeba start them.
+
+### First run
+
+With `AMOEBA_BOOTSTRAP=1`, an empty `/etc/amoeba` gets a signing secret, an `admin` user and an empty catalog, so the quick start needs no setup step.
+
+[[src/bootstrap.rs#jwt_secret]] keeps a generated secret in `jwt_secret`, used only when there is no `config.toml` and no `AMOEBA_LOCAL_JWT_SECRET`. [[src/bootstrap.rs#ensure_admin]] creates `admin` only when there are no users, writes its random password to `admin-password` (mode 0600) and logs it once. [[src/bootstrap.rs#ensure_catalog]] writes a one-machine Docker catalog when there is none. Existing state is never changed. Without the variable a missing secret is still a startup error, so a misconfigured production server fails closed.
+
+### Console in the image
+
+The Dockerfile builds `web/` and copies it to `/app/console`; the gateway serves it at every path the API does not use, with `index.html` as the fallback. `AMOEBA_CONSOLE_DIR` moves it; without the directory nothing is served, as before.

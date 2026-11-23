@@ -1,4 +1,13 @@
-# --- Stage 1: Build Stage ---
+# --- Stage 1: Web console ---
+FROM node:22-alpine AS web
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
+# --- Stage 2: Build Stage ---
 FROM rust:alpine AS builder
 
 WORKDIR /usr/src/amoeba
@@ -13,7 +22,7 @@ COPY examples/app-packages ./examples/app-packages
 # Build release binaries (orchestrator + admin CLI) optimized for size and speed
 RUN cargo build --release --bin amoeba --bin amoeba-admin
 
-# --- Stage 2: Minimal Runtime Stage ---
+# --- Stage 3: Minimal Runtime Stage ---
 FROM alpine:3.20
 
 WORKDIR /app
@@ -27,6 +36,8 @@ RUN apk add --no-cache ca-certificates tzdata docker-cli docker-cli-compose
 
 COPY --from=builder /usr/src/amoeba/target/release/amoeba /usr/local/bin/amoeba
 COPY --from=builder /usr/src/amoeba/target/release/amoeba-admin /usr/local/bin/amoeba-admin
+# Served at / by the gateway (AMOEBA_CONSOLE_DIR), next to the API.
+COPY --from=web /web/dist /app/console
 
 EXPOSE 8080
 

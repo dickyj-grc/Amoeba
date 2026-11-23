@@ -1,0 +1,9 @@
+# Keep the build context small and free of local state and secrets.
+.git
+target
+.dev
+config
+services/*/target
+web/node_modules
+web/dist
+progress.md
