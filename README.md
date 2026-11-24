@@ -4,7 +4,9 @@
 <td>
 
 # Amoeba
-**The self-hosted gateway between AI and your systems.** Amoeba lets agents use your internal systems without ever holding their secrets, and lets you deploy apps that Claude, ChatGPT, or Gemini built the moment they are ready. It is one Rust binary, and it needs no Kubernetes.
+**Let AI build and deploy your internal apps, safely. One binary, no Kubernetes, idle apps cost nothing.**
+
+Amoeba is a self-hosted gateway between AI and your systems. It lets agents use your internal systems without ever holding their secrets, and lets you deploy apps that Claude, ChatGPT, or Gemini built the moment they are ready.
 
 > **New:** [amoeba-mcp](docs/mcp-server.md) — an MCP server that lets AI agents (Claude, ChatGPT, Gemini) deploy and manage microservices on Amoeba.
 >
@@ -14,6 +16,75 @@
 </tr>
 </table>
 
+
+## Quick start
+
+One command, on any machine with Docker:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dickyj-grc/Amoeba/main/docker-compose.quickstart.yml | docker compose -p amoeba -f - up -d
+```
+
+Open <http://localhost:8080> and sign in as `admin`. The first run creates that user with a random password and prints it once:
+
+```bash
+docker logs amoeba 2>&1 | grep password
+```
+
+From the console, deploy an app from the **App library**, a Docker image, a Git repo or a Dockerfile. Stop everything with `docker compose -p amoeba down` (add `-v` to delete its data too). For TLS and a public hostname, see [Deployment](#5-deployment-docker-compose); to work on Amoeba itself, see [Run Locally](#run-locally).
+
+## Highlights
+
+### Claude deploys the app it just wrote
+
+<!-- GIF: Claude writes a small app, calls deploy_service, reads the build log, fixes an error, and opens the deployed URL. Save as images/claude-deploys.gif and replace this comment with:
+<img src="images/claude-deploys.gif" alt="Claude deploying an app to Amoeba with amoeba-mcp" width="720" /> -->
+
+Connect [amoeba-mcp](docs/mcp-server.md) to Claude, ChatGPT or Gemini, and the assistant that wrote an app deploys it itself:
+
+1. It calls `deploy_service` with a Dockerfile, a source tarball or an image.
+2. amoeba-mcp builds the image on the Amoeba host, and Amoeba starts it at `/v1/<app>/` behind a login. With a cooldown set, it sleeps when idle.
+3. If the build or start fails, the assistant reads `get_build_logs` or `get_runtime_logs`, fixes the code and deploys again.
+
+No DNS record, TLS certificate, reverse-proxy rule or port to pick. Who may call the app is a role list you can change in the console.
+
+### Agents query your database and see only what their role allows
+
+The [database service](#8-database-service) lets agents use PostgreSQL without the password and without writing SQL. Callers run only approved queries and tables, and each column is shown, masked or hidden per role, in the SQL itself:
+
+| Caller's role | `GET /v1/finance-db/tables/customers/1` returns |
+|---|---|
+| `cs_agent` | `id`, `name`, `nik: "************8901"` |
+| `compliance` | every column, `nik` in full, `balance` |
+| a role not granted the table | `403`, and no row is read |
+
+Every approved query and table is also an MCP tool, and an agent is shown only the tools its roles may use.
+
+## How Amoeba compares
+
+These projects overlap with parts of Amoeba, and each is the better choice for some jobs. Compared from each project's own documentation in November 2026; if something here is wrong or out of date, please [open an issue](https://github.com/dickyj-grc/Amoeba/issues).
+
+| | **Amoeba** | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [Obot](https://github.com/obot-platform/obot) | [agentgateway](https://agentgateway.dev) | [Sablier](https://github.com/sablierapp/sablier) |
+|---|---|---|---|---|---|
+| **What it is** | Gateway that runs your apps and MCP servers | Docker CLI plugin that runs catalog MCP servers | MCP platform: catalog, hosting, chat | Proxy for MCP, A2A and LLM traffic | Scale-to-zero add-on for reverse proxies |
+| **Language, license** | Rust, MIT | Go, MIT | Go, MIT | Rust, Apache-2.0 | Go, AGPL-3.0 |
+| **Runs the workloads** | Yes, Docker or Apple containers | Yes, MCP servers as containers | Yes, MCP servers on Docker or Kubernetes | No, proxies servers that already run | Starts and stops containers you define |
+| **Deploys any HTTP app, from an image, Git or Dockerfile** | Yes | No, MCP servers only | No, MCP servers only | No | No |
+| **Stops idle workloads** | Yes, per-service cooldown | Starts servers on demand | Not documented for hosted servers | No | Yes, its main job |
+| **Who may call what** | Roles per operation, per organization, on every request | OAuth to the services it calls; no per-caller roles | Per user and group, per server and tool | JWT and fine-grained RBAC | None; leave it to the proxy |
+| **Keeps backend credentials from callers** | Yes, injected at the gateway | Secrets mounted into the server container | Yes, managed credentials and OAuth | Yes, backend auth policies | No |
+| **Database access with per-role column masking** | Yes | No | No | No | No |
+| **AI deploys apps itself** | Yes, `amoeba-mcp` | Adds catalog servers on request | No | No | No |
+| **Production setup** | One binary or container | Docker Desktop or Docker Engine | Kubernetes recommended | One binary, or Kubernetes | Next to Traefik, Caddy, Nginx and others |
+
+**When to pick something else:**
+
+- **Docker MCP Gateway**, if you want catalog MCP servers on your own machine through Docker Desktop, with signed images and secret scanning.
+- **Obot**, for an organization-wide MCP catalog with SSO groups, a chat client and Kubernetes hosting.
+- **agentgateway**, for a high-throughput proxy in front of agents and LLM providers that already run elsewhere, especially on Kubernetes.
+- **Sablier**, if you only want idle containers to sleep behind the reverse proxy you already use.
+
+Amoeba is younger than these and has known limits: one machine per instance, no WebSocket proxying, PostgreSQL only for the database service, and plain HTTP from the gateway to the app (see [Status](#status)).
 
 ## What Amoeba Does
 
@@ -155,7 +226,7 @@ Other databases (SQL Server, Oracle) would need their own work in phase 2.
 
 ## Run Locally
 
-One command starts Amoeba and the web console on your machine:
+To try Amoeba, use the [quick start](#quick-start). To work on Amoeba itself, run it from a checkout with live code changes:
 
 ```bash
 git clone https://github.com/dickyj-grc/Amoeba.git && cd Amoeba

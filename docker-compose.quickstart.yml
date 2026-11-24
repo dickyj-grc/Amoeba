@@ -1,0 +1,37 @@
+# One-command quick start: the gateway and its web console on one port.
+#
+#   curl -fsSL https://raw.githubusercontent.com/dickyj-grc/Amoeba/main/docker-compose.quickstart.yml \
+#     | docker compose -p amoeba -f - up -d
+#
+# Then open http://localhost:8080 and sign in as `admin`. The password is in
+# the log (`docker logs amoeba 2>&1 | grep password`) and in the data volume
+# (`docker exec amoeba cat /etc/amoeba/admin-password`).
+#
+# State (signing secret, users, service catalog) lives in the `amoeba-data`
+# volume. For TLS and a public hostname, use docker-compose.yml with Caddy.
+services:
+  amoeba:
+    image: ghcr.io/dickyj-grc/amoeba:latest
+    container_name: amoeba
+    restart: unless-stopped
+    environment:
+      # First run: generate a signing secret, an admin user and an empty
+      # catalog in /etc/amoeba. Existing state is never changed.
+      - AMOEBA_BOOTSTRAP=1
+      - RUST_LOG=info
+    ports:
+      - "8080:8080"
+    volumes:
+      - amoeba-data:/etc/amoeba
+      # Amoeba starts and stops your apps as sibling containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - amoeba-net
+
+networks:
+  # Apps join this network by name, so it must not get a project prefix.
+  amoeba-net:
+    name: amoeba-net
+
+volumes:
+  amoeba-data:

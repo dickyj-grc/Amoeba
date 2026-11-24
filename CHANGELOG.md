@@ -6,6 +6,17 @@
 
 - **Installing onto a taken name now fails with 409.** Before, it silently replaced the existing service. Send `replace: true` (in the package `values`, or the library install body) to replace or upgrade it. The MCP server's `deploy_service` tool takes `replace` too.
 
+### Quick start in one command
+
+- **`docker-compose.quickstart.yml`** runs Amoeba and its web console on port 8080 with nothing to set up: `curl -fsSL …/docker-compose.quickstart.yml | docker compose -p amoeba -f - up -d`.
+- **First run (`AMOEBA_BOOTSTRAP=1`).** On an empty data directory Amoeba generates a signing secret, creates `admin` with a random password (logged once, and kept in `/etc/amoeba/admin-password`), and writes an empty catalog. Without the variable a missing secret is still a startup error.
+- **The image serves the web console** at `/`, next to the API. Set `AMOEBA_CONSOLE_DIR` to serve it from elsewhere.
+- **`.dockerignore`** keeps `target/`, `node_modules`, local config and secrets out of image builds.
+
+### README
+
+- New quick start, highlights (Claude deploying an app; per-role column masking) and a comparison with Docker MCP Gateway, Obot, agentgateway and Sablier, near the top.
+
 ### Settings that stay
 
 - **Adjust before deploy.** The App library tab has an "Adjust" section: who can call the app, memory, CPU and idle stop, starting from the app's own values.
