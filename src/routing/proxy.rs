@@ -4,6 +4,7 @@ use super::operation::{AccessDeny, authorize, resolve_operation};
 use crate::apps::manager::not_ready_message;
 use crate::apps::state::AppLifecycleState;
 use crate::auth::Claims;
+use crate::auth::delegation;
 use crate::auth::middleware::verify_request_token;
 use crate::capacity::limiter::{fits_within_budget, sum_resource_usage};
 use crate::config::schema::ServiceConfig;
@@ -11,6 +12,7 @@ use crate::lifecycle::container::{
     ServiceRuntimeState, is_occupying_capacity, now_unix, wait_until_ready,
 };
 use crate::metering::telemetry::emit_usage_telemetry;
+use crate::routing::websocket;
 use crate::state::AppState;
 use axum::{
     body::Body,
@@ -29,6 +31,14 @@ use tracing::{error, info};
 /// Builds the upstream URL for a resolved service and request subpath.
 pub fn build_target_url(host: &str, port: u16, subpath: &str) -> String {
     format!("http://{host}:{port}/{subpath}")
+}
+
+/// The caller's query string, if any, carried over to the app.
+pub fn with_query(url: String, query: Option<&str>) -> String {
+    match query {
+        Some(query) if !query.is_empty() => format!("{url}?{query}"),
+        _ => url,
+    }
 }
 
 /// Header carrying *why* a request was rejected. `503` alone is ambiguous
@@ -112,6 +122,7 @@ fn is_gateway_identity_header(name: &HeaderName) -> bool {
     let lower = name.as_str().to_ascii_lowercase();
     lower == "x-amoeba-org"
         || lower == "x-amoeba-user"
+        || lower == delegation::CALLER_TOKEN_HEADER
         || lower == "x-amoeba-roles"
         || lower.starts_with("x-amoeba-secret-")
 }
@@ -203,6 +214,17 @@ impl Drop for ConnGuard {
     }
 }
 
+/// An open WebSocket session: counted as an active connection while open, so
+/// the reaper never stops the app under it, and it restarts the idle clock
+/// when it closes.
+struct WsSession(ConnGuard);
+
+impl Drop for WsSession {
+    fn drop(&mut self) {
+        self.0.0.touch();
+    }
+}
+
 /// Hop-by-hop headers that must not be blindly forwarded between client and
 /// upstream. Dropping these prevents connection-management confusion (e.g.
 /// `Transfer-Encoding: chunked` from upstream being misinterpreted by the
@@ -237,7 +259,7 @@ pub async fn proxy_handler_root(
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     Path((service_name, subpath)): Path<(String, String)>,
-    req: Request,
+    mut req: Request,
 ) -> Result<Response, StatusCode> {
     let start_time = Instant::now();
 
@@ -315,7 +337,28 @@ pub async fn proxy_handler(
             };
             return Ok(rejection(StatusCode::FORBIDDEN, reason));
         }
+        // A token an app got to act for its caller works only on the
+        // services that app declared in `calls`.
+        if !delegation::allows(claims, &service_name) {
+            info!(
+                user = %claims.sub,
+                via = ?claims.via,
+                service = %service_name,
+                "⛔ Delegated token used outside its services (403 Forbidden)"
+            );
+            return Ok(rejection(StatusCode::FORBIDDEN, "delegation"));
+        }
     }
+    // Who called, for the usage log: "alice", or "alice via scraper".
+    let caller_label = match &claims {
+        Some(Claims {
+            sub,
+            via: Some(via),
+            ..
+        }) => format!("{sub} via {via}"),
+        Some(claims) => claims.sub.clone(),
+        None => "anonymous".to_string(),
+    };
 
     // 5. Track Runtime Activity & Connection Counter. `runtime` is an owned
     // `Arc` clone (independent of any guard), but resolving it and computing
@@ -455,7 +498,10 @@ pub async fn proxy_handler(
     let host = runtime
         .resolved_host()
         .unwrap_or_else(|| service_cfg.upstream_host().to_string());
-    let target_url = build_target_url(&host, service_cfg.placement.port, &subpath);
+    let target_url = with_query(
+        build_target_url(&host, service_cfg.placement.port, &subpath),
+        req.uri().query(),
+    );
     let mut outbound_req = state.http_client.request(req.method().clone(), &target_url);
 
     // 6.5. Forward client headers before consuming the body.
@@ -464,6 +510,17 @@ pub async fn proxy_handler(
     // The caller's org and user come from the verified token, never from
     // headers the client supplied (those were dropped above).
     outbound_req = apply_caller_identity(outbound_req, claims.as_ref());
+
+    // An app that calls other services for its caller gets a token to do so
+    // as that caller, limited to the services it declared.
+    if let Some(claims) = &claims
+        && !service_cfg.calls.is_empty()
+    {
+        match delegation::issue(claims, &service_name, &service_cfg.calls) {
+            Ok(token) => outbound_req = outbound_req.header(delegation::CALLER_TOKEN_HEADER, token),
+            Err(message) => error!(service = %service_name, "{message}"),
+        }
+    }
 
     // 7. Handle Upstream Token Translation / Credential Injection
     outbound_req = match apply_upstream_auth(outbound_req, service_cfg)
@@ -478,6 +535,52 @@ pub async fn proxy_handler(
             ));
         }
     };
+
+    // 7.5. A WebSocket handshake: hand the connection to the app instead of
+    // proxying one request. Same checks and headers as any request.
+    if websocket::is_websocket_upgrade(req.headers()) {
+        let client = hyper::upgrade::on(&mut req);
+        let upstream_req = outbound_req.build().map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let url = upstream_req.url();
+        let path_and_query = match url.query() {
+            Some(query) => format!("{}?{query}", url.path()),
+            None => url.path().to_string(),
+        };
+        let port = service_cfg.placement.port;
+        let host_header = if service_cfg.local_upstream {
+            format!("localhost:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        let session = WsSession(guard);
+        let result = websocket::tunnel(
+            &host,
+            port,
+            &path_and_query,
+            &host_header,
+            upstream_req.headers(),
+            client,
+            session,
+        )
+        .await;
+        return match result {
+            Ok(response) => {
+                emit_usage_telemetry(
+                    &caller_label,
+                    claims.as_ref().and_then(|c| c.org_id.as_deref()),
+                    &service_name,
+                    operation,
+                    response.status().as_u16(),
+                    start_time.elapsed().as_millis(),
+                );
+                Ok(response)
+            }
+            Err(message) => {
+                error!(service = %service_name, "WebSocket handshake failed: {message}");
+                Err(StatusCode::BAD_GATEWAY)
+            }
+        };
+    }
 
     // Forward Request Payload Body
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
@@ -496,10 +599,7 @@ pub async fn proxy_handler(
             // 9. Emit Usage Telemetry Log (at response-headers time; body may
             // stream for minutes for SSE).
             emit_usage_telemetry(
-                claims
-                    .as_ref()
-                    .map(|c| c.sub.as_str())
-                    .unwrap_or("anonymous"),
+                &caller_label,
                 claims.as_ref().and_then(|c| c.org_id.as_deref()),
                 &service_name,
                 operation,
@@ -573,6 +673,7 @@ mod tests {
             header_from_secret: HashMap::new(),
             local_upstream: false,
             interface: None,
+            calls: Vec::new(),
             source: None,
             overrides: None,
         }
@@ -618,6 +719,7 @@ mod tests {
             roles: vec!["analyst".into()],
             exp: 0,
             jti: "jti".into(),
+            ..Default::default()
         };
         let client = reqwest::Client::new();
         let req = apply_caller_identity(client.get("http://127.0.0.1/x"), Some(&claims));

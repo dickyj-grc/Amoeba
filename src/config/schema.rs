@@ -414,6 +414,10 @@ pub struct ServiceConfig {
     /// How to call the service; from the app package, for the console.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<AppInterface>,
+    /// Services this app calls for its caller, with the caller's identity
+    /// (`x-amoeba-caller-token`). See [`crate::auth::delegation`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<String>,
     /// Where the app was installed from, so a reinstall can tell an upgrade
     /// of the same app from a different app taking its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]

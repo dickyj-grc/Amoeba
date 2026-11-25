@@ -6,6 +6,21 @@
 
 - **Installing onto a taken name now fails with 409.** Before, it silently replaced the existing service. Send `replace: true` (in the package `values`, or the library install body) to replace or upgrade it. The MCP server's `deploy_service` tool takes `replace` too.
 
+### Calls on behalf of the caller
+
+- **`calls: [lightpanda]` in a manifest** (and `calls` on amoeba-mcp's `deploy_service`) lets an app call other services as whoever called it. Each request carries `x-amoeba-caller-token`, which the app sends as `Authorization: Bearer` when calling those services through the gateway. The called service checks the original caller's roles, so a Stagehand or Playwright app and the browser it drives must both grant them.
+- The token works only on the listed services, lasts at most an hour (never past the caller's own token), is revoked with the caller's token, and shows in the usage log as `alice via scraper`. Callers cannot forge it, and apps without `calls` never get one.
+
+### WebSockets
+
+- **WebSocket connections pass through the gateway**, with the same token and role checks as any request. Playwright, Puppeteer or Stagehand on a laptop or in CI can drive a browser hosted on Amoeba, which starts on connect and sleeps when idle: `chromium.connectOverCDP("wss://<amoeba>/v1/<browser>/", { headers: { Authorization: "Bearer <token>" } })`. Notebooks, web terminals and live dashboards work behind Amoeba too.
+- An open session counts as an active connection, so the app is never stopped mid-session. `local_upstream` applies, which Chrome and Lightpanda need.
+
+### Fixes
+
+- **amoeba-mcp docs said `deploy_service` secrets are stored encrypted.** They are files on the Amoeba host readable only by Amoeba, outside the catalog; only package secret files travel age-encrypted.
+- **Query strings are forwarded.** The proxy sent apps only the path, so `?status=overdue` filters (including the database service's) and tokens in URLs never arrived.
+
 ### Quick start in one command
 
 - **`docker-compose.quickstart.yml`** runs Amoeba and its web console on port 8080 with nothing to set up: `curl -fsSL …/docker-compose.quickstart.yml | docker compose -p amoeba -f - up -d`.

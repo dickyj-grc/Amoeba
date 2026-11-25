@@ -59,6 +59,56 @@ A configured credential that cannot be produced rejects the request with `503` a
 
 This covers an unset or empty env var, a missing or empty `token_secret` file, a missing token source or `header_name`, an unknown `type`, or a value that is not a valid header. The old behaviour sent `Bearer ` with an empty token.
 
+## Query strings reach the app
+
+The caller's query string is passed to the app unchanged; before, the proxy sent only the path, so `?status=overdue` filters and URL tokens never arrived.
+
+[[src/routing/proxy.rs#with_query]] appends it to the upstream URL, for plain requests and WebSocket handshakes alike.
+
+## Calls for the caller
+
+An app that declares `calls` gets `x-amoeba-caller-token` on each request: the caller's identity, usable only on those services, so a downstream service checks the original caller's roles.
+
+The use is an app such as a Playwright or Stagehand scraper driving a hosted browser through the gateway: the browser should admit whoever may use it, not the scraper. [[src/auth/delegation.rs#issue]] signs the token with a key the gateway generates at startup (it cannot sign with an identity provider's key), carrying the caller's `sub`, org, roles and `jti`, `svc` (the declared services) and `via` (the app). It lasts at most an hour and never past the caller's token. [[src/auth/mod.rs#JwtEngine#verify_token]] picks that key by the token's `kid`, and [[src/routing/proxy.rs#proxy_handler]] refuses it outside `svc` ([[src/auth/delegation.rs#allows]]) and logs the caller as `alice via scraper`.
+
+### Downstream checks the caller
+
+Through the app, a service sees the caller's user and roles, and refuses a caller whose roles it does not grant, exactly as it would directly.
+
+### Only the declared services
+
+The token is refused (403) on a service the app did not list in `calls`, even one the caller may use directly.
+
+### Only for apps that declare calls
+
+Apps without `calls` never receive the header, and a copy sent by the caller is dropped, so an app cannot be handed a forged token.
+
+### Revoked with the caller
+
+The token carries the caller's `jti`, so revoking the caller's token makes it fail with 401 too.
+
+## WebSockets
+
+A WebSocket handshake gets the same checks as any request, then the connection is handed to the app and passed through byte for byte, so browser automation (CDP), notebooks and terminals work behind Amoeba.
+
+[[src/routing/websocket.rs#is_websocket_upgrade]] spots the handshake in [[src/routing/proxy.rs#proxy_handler]] after auth, the role check (a `GET`, so `read` unless an operation rule says otherwise), waking the app and header rewriting. [[src/routing/websocket.rs#tunnel]] sends the handshake to the app over TCP; on `101` it answers the caller and joins the two connections until either closes. Frames are not parsed, so any subprotocol works. The proxy's usual header rewriting applies: no caller token, verified `x-amoeba-*` identity, injected credentials.
+
+### Messages pass both ways
+
+Text and binary messages reach the app and come back unchanged, the app sees the path and query, and the open session counts as an active connection until it closes, so the reaper never stops the app under a caller.
+
+### Same checks as any request
+
+A handshake without a token gets 401 and one without a permitted role gets 403, and neither reaches the app.
+
+### Local-only apps
+
+With `local_upstream`, the app sees `Host: localhost:<port>` and no `Origin`, which Chrome's and Lightpanda's CDP servers require.
+
+### Refused upgrades
+
+When the app answers the handshake with anything but `101`, the caller gets that answer and the session slot is released.
+
 ## Service status
 
 `GET /admin/apps/<name>` reports the install lifecycle (`installed`, `pulling`, `ready`, `error` with a message), a `runtime` block (`running`, `active_requests`, `last_request_at`, `port`, `public`) and the package's `interface`.

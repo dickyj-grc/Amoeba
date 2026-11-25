@@ -81,6 +81,7 @@ impl JwtEngine {
             roles: roles.to_vec(),
             exp,
             jti: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
         };
 
         let token = encode(

@@ -18,6 +18,10 @@ path = "src/bin/amoeba-mcp.rs"
 [dependencies]
 axum = { version = "0.7", features = ["macros", "multipart"] }
 tokio = { version = "1.38", features = ["full"] }
+# WebSocket pass-through: take over the caller's connection after the upgrade.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+httparse = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -43,4 +47,5 @@ base64 = "0.22"
 schemars = "0.8"
 
 [dev-dependencies]
+tokio-tungstenite = "0.24"
 tower = { version = "0.5", features = ["util"] }
