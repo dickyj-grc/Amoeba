@@ -298,6 +298,11 @@ fn tool_definitions() -> Vec<ToolDef> {
                         "type": "integer",
                         "description": "CPU core limit."
                     },
+                    "calls": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Other Amoeba services this app calls for its caller, e.g. [\"lightpanda\"]. Each request then carries the header x-amoeba-caller-token: send it as 'Authorization: Bearer <token>' when calling those services through the gateway, so they check the original caller's roles."
+                    },
                     "replace": {
                         "type": "boolean",
                         "description": "Replace an existing service with this name. Without it, deploying onto a taken name fails."
@@ -926,6 +931,7 @@ async fn install_app_on_amoeba(
     memory: Option<&str>,
     cpu_cores: Option<u64>,
     replace: bool,
+    calls: &[String],
 ) -> Result<(u16, String), String> {
     let manifest = AppManifest {
         api_version: "v1".into(),
@@ -951,6 +957,7 @@ async fn install_app_on_amoeba(
         operation_rules: Vec::new(),
         local_upstream: false,
         interface: None,
+        calls: calls.to_vec(),
         resources: if memory.is_some() || cpu_cores.is_some() {
             Some(amoeba::apps::schema::ResourceSpec {
                 memory: memory.map(|m| m.to_string()),
@@ -1260,6 +1267,14 @@ async fn handle_tool_call(
             let memory = args["memory"].as_str().map(|s| s.to_string());
             let cpu_cores = args["cpu_cores"].as_u64();
             let replace = args["replace"].as_bool().unwrap_or(false);
+            let calls: Vec<String> = args["calls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
             let readiness_timeout = args["readiness_timeout_secs"].as_u64().unwrap_or(120);
 
             let env: HashMap<String, String> = args["env"]
@@ -1357,6 +1372,7 @@ async fn handle_tool_call(
                 memory.as_deref(),
                 cpu_cores,
                 replace,
+                &calls,
             )
             .await?;
 

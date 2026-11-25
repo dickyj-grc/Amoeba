@@ -5,3 +5,4 @@ pub mod apps_admin;
 pub mod auth;
 pub mod operation;
 pub mod proxy;
+pub mod websocket;

@@ -1,5 +1,6 @@
 //! Unified JWT verification: local HMAC mode and remote JWKS mode.
 
+pub mod delegation;
 pub mod issued;
 pub mod jwks;
 pub mod jwt;
@@ -13,13 +14,20 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Claims {
     pub sub: String,
     pub org_id: Option<String>,
     pub roles: Vec<String>,
     pub exp: usize,
     pub jti: String,
+    /// Services this token may be used on; absent means any. Set on tokens
+    /// an app gets to call services for its caller ([`delegation`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc: Option<Vec<String>>,
+    /// The app acting for the caller, on a delegated token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Clone)]
@@ -42,7 +50,12 @@ pub struct JwtEngine {
 
 impl JwtEngine {
     pub async fn verify_token(&self, token: &str) -> Result<Claims, String> {
+        let delegated = decode_header(token)
+            .ok()
+            .and_then(|h| h.kid)
+            .is_some_and(|kid| kid == delegation::KID);
         let claims = match &self.mode {
+            _ if delegated => delegation::verify(token)?,
             AuthMode::LocalJwt { secret } => {
                 let key = DecodingKey::from_secret(secret);
                 decode::<Claims>(token, &key, &self.validation)
@@ -113,6 +126,7 @@ mod tests {
             roles: vec!["admin".into()],
             exp,
             jti: "jti-1".into(),
+            ..Default::default()
         }
     }
 

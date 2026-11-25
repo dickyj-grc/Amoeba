@@ -438,6 +438,15 @@ pub(crate) fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManager
     if let Some(interface) = &manifest.interface {
         interface.validate().map_err(AppManagerError::Validation)?;
     }
+    if let Some(bad) = manifest
+        .calls
+        .iter()
+        .find(|s| s.is_empty() || s.contains('/') || s.as_str() == manifest.name)
+    {
+        return Err(AppManagerError::Validation(format!(
+            "calls: '{bad}' is not another service's name"
+        )));
+    }
     if let AppSpec::Image { command, .. } = &manifest.app
         && command.iter().any(|a| a.is_empty() || a.contains('\0'))
     {
@@ -853,6 +862,7 @@ fn build_service_config(
         header_from_secret,
         local_upstream: manifest.local_upstream,
         interface: manifest.interface.clone(),
+        calls: manifest.calls.clone(),
         source: None,
         overrides: None,
     }

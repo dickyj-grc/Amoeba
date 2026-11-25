@@ -84,7 +84,7 @@ These projects overlap with parts of Amoeba, and each is the better choice for s
 - **agentgateway**, for a high-throughput proxy in front of agents and LLM providers that already run elsewhere, especially on Kubernetes.
 - **Sablier**, if you only want idle containers to sleep behind the reverse proxy you already use.
 
-Amoeba is younger than these and has known limits: one machine per instance, no WebSocket proxying, PostgreSQL only for the database service, and plain HTTP from the gateway to the app (see [Status](#status)).
+Amoeba is younger than these and has known limits: one machine per instance, PostgreSQL only for the database service, and plain HTTP from the gateway to the app (see [Status](#status)).
 
 ## What Amoeba Does
 
@@ -202,12 +202,13 @@ Amoeba is designed for environments where you want control without operational o
 | Upstream credential injection, fail-closed | Shipped |
 | Scale-to-zero for single containers and compose stacks, capacity budgets | Shipped |
 | Streaming responses (SSE, Streamable HTTP for MCP) | Shipped |
+| WebSockets, e.g. Playwright or Puppeteer driving a hosted browser over CDP | Shipped |
 | App packages, web console deploys, source builds, `amoeba-mcp` | Shipped |
 | [Database service](#8-database-service) (PostgreSQL): approved queries, table CRUD, column masking, MCP tools | Shipped |
 | Pluggable secret backends (Vault, HTTP provider) | Planned |
 | External upstreams: services Amoeba does not start itself, HTTPS to the upstream | Planned |
 
-**Current limits:** every service must be a container or compose stack that Amoeba starts; the hop from Amoeba to the service is plain `http://` on a private network; WebSocket upgrades are not proxied; request bodies are capped at 10 MB.
+**Current limits:** every service must be a container or compose stack that Amoeba starts; the hop from Amoeba to the service is plain `http://` on a private network; request bodies are capped at 10 MB.
 
 ### Roadmap
 

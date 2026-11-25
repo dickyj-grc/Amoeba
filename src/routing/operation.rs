@@ -279,6 +279,7 @@ mod tests {
             roles: roles.iter().map(|r| r.to_string()).collect(),
             exp: 0,
             jti: "jti-test".into(),
+            ..Default::default()
         }
     }
 
@@ -330,6 +331,7 @@ mod tests {
             header_from_secret: HashMap::new(),
             local_upstream: false,
             interface: None,
+            calls: Vec::new(),
             source: None,
             overrides: None,
         }

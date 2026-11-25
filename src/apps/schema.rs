@@ -60,6 +60,12 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<crate::config::schema::AppInterface>,
 
+    /// Services this app calls on behalf of whoever called it. Requests from
+    /// a signed-in caller then carry `x-amoeba-caller-token`, valid only on
+    /// these services, so each one checks the original caller's roles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<String>,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,

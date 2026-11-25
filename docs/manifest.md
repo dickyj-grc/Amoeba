@@ -82,6 +82,7 @@ interface:
 | `resources` | object | no | Footprint while running, for capacity checks. See [`resources`](#resources). |
 | `schema` | object | no | Settings and secrets the installer provides. See [`schema`](#schema). |
 | `interface` | object | no | How callers use the app, shown by the console. See [`interface`](#interface). |
+| `calls` | list | no | Other services this app calls on behalf of its caller. See [Calling other services](#calling-other-services). |
 
 ## `app`
 
@@ -223,11 +224,35 @@ How callers use the app. The console shows it after deploy, starts its Test dial
 
 | Field | Type | Meaning |
 |---|---|---|
-| `type` | `mcp`, `openapi`, `http` or `cdp` | The protocol. `cdp` (browser automation over WebSocket) is not relayed by the gateway yet. |
+| `type` | `mcp`, `openapi`, `http` or `cdp` | The protocol. `cdp` is browser automation over a WebSocket: Playwright's `connectOverCDP("wss://<amoeba>/v1/<name>/", { headers: { Authorization: "Bearer <token>" } })`. |
 | `path` | string | Where the API lives under `/v1/<name>`, starting with `/`, e.g. `/mcp`. |
 | `summary` | string | One or two sentences on how to call it. |
 | `docs` | URL | Documentation for the API. |
 | `try` | object | A sample request: `method` (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`), `path` (starts with `/`) and optional JSON `body`. |
+
+## Calling other services
+
+An app that uses another Amoeba service, such as a Playwright or Stagehand scraper that drives a hosted Lightpanda browser, should call it through the gateway as the person or agent that called the app:
+
+```yaml
+name: scraper
+calls: [lightpanda]
+permissions:
+  read: [analyst]
+```
+
+Every request from a signed-in caller then carries the header `x-amoeba-caller-token`. The app sends it on, as `Authorization: Bearer <token>`, when it calls a listed service through the gateway:
+
+```js
+const browser = await chromium.connectOverCDP('ws://amoeba:8080/v1/lightpanda/', {
+  headers: { Authorization: `Bearer ${req.headers['x-amoeba-caller-token']}` },
+});
+```
+
+- **The called service checks the original caller's roles**, so both `scraper` and `lightpanda` must grant them. An analyst who may use the scraper but not the browser is refused by the browser.
+- **The token works only on the services in `calls`**, lasts at most an hour (never past the caller's own token), and is revoked with the caller's token. The usage log shows such calls as `alice via scraper`.
+- **Callers cannot send their own** `x-amoeba-caller-token`; the gateway drops it. Apps without `calls` never receive one, and neither do public apps.
+- From inside an app container the gateway is `amoeba:8080` with the quick-start compose file, or `amoeba-orchestrator:8080` with `docker-compose.yml`.
 
 ## Validation
 
@@ -239,6 +264,7 @@ An install is refused, with a `400` naming the problem, when:
 - a resource quantity cannot be parsed;
 - an env field has an unknown `type`, empty `options`, or a `default` that does not match its `type` or `options`;
 - an `interface` path does not start with `/`, `try.method` is not an HTTP method, or `docs` is not an http(s) URL;
+- a `calls` entry is empty, contains `/`, or names the app itself;
 - an `app.command` entry is empty or has a `${...}` other than `${PORT}`, or an image app's `schema` declares `PORT`;
 - an `operation_rules` path pattern is invalid (for example `**` not at the end);
 - a required secret is missing, a secret fails its `validation_pattern`, a required env value without a default is missing, an env value does not match its `type` or `options`, or the installer sends an env value or secret the manifest does not declare.

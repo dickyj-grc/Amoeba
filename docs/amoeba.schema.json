@@ -140,6 +140,11 @@
         }
       }
     },
+    "calls": {
+      "type": "array",
+      "description": "Other services this app calls on behalf of its caller; requests then carry x-amoeba-caller-token, valid only on these services.",
+      "items": { "type": "string", "pattern": "^[^/]+$" }
+    },
     "interface": {
       "type": "object",
       "description": "How callers use the app; shown by the console after deploy.",

@@ -105,12 +105,14 @@ Deploy a microservice to Amoeba.
 | `port` | integer | yes | Container port |
 | `cooldown_seconds` | integer | no | Idle seconds before scale-to-zero |
 | `env` | object | no | Environment variables |
-| `secrets` | object | no | Secret values (stored encrypted) |
+| `secrets` | object | no | Secret values, stored as files on the Amoeba host readable only by Amoeba (not in the catalog) |
 | `permissions` | object | no | Operation → roles map |
 | `public` | boolean | no | Skip JWT auth if true |
 | `memory` | string | no | Memory limit (e.g. `512Mi`) |
 | `cpu_cores` | integer | no | CPU core limit |
 | `readiness_timeout_secs` | integer | no | Max wait for readiness (default 120) |
+| `calls` | array | no | Other Amoeba services this app calls for its caller, e.g. `["lightpanda"]`. Each request then carries `x-amoeba-caller-token`; send it as `Authorization: Bearer <token>` when calling those services through the gateway, so they check the original caller's roles |
+| `replace` | boolean | no | Replace an existing service with this name; without it, a taken name fails |
 
 **Example — Deploy a Python FastAPI service from a Dockerfile:**
 
