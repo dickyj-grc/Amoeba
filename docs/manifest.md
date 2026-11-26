@@ -83,6 +83,8 @@ interface:
 | `schema` | object | no | Settings and secrets the installer provides. See [`schema`](#schema). |
 | `interface` | object | no | How callers use the app, shown by the console. See [`interface`](#interface). |
 | `calls` | list | no | Other services this app calls on behalf of its caller. See [Calling other services](#calling-other-services). |
+| `sandbox` | object | no | How the app's containers are confined; safe defaults apply when absent. See [`sandbox`](#sandbox). |
+| `rate_limit_per_minute` | integer | no | Requests each caller may make per minute; `0` is unlimited. Default: the gateway's (600). |
 
 ## `app`
 
@@ -133,6 +135,16 @@ permissions:
   read: [admin, analyst]
   add: [admin]
 ```
+
+**MCP tools.** For an MCP app, `tool:<name>` lists the roles that may call that tool, on top of the request's own operation (`add` for MCP). `tool:*` covers tools without their own entry. A batch of calls needs every one allowed.
+
+```yaml
+permissions:
+  add: [analyst, admin]           # use the MCP server at all
+  tool:delete_invoice: [admin]    # only admins may delete
+```
+
+The gateway also pins an MCP app's tools: it records each tool's definition when the app is first ready, reads them again after each start and every five minutes, and refuses calls to a tool that is new or changed since (`403`, reason `tool-not-approved`) until an admin approves the current list. That stops a server from quietly rewording a tool to steer agents. Approve with the console's *Approve current tools* button or `POST /admin/apps/<name>/tools/approve`. Reinstalling the app re-pins its tools.
 
 Tokens issued from the console's Token dialog carry the role `mcp:<name>`. List it to let those tokens call the app. MCP over HTTP posts every call, so MCP servers need `add` (and `read` for the event stream, `delete` to end a session).
 
@@ -230,6 +242,53 @@ How callers use the app. The console shows it after deploy, starts its Test dial
 | `docs` | URL | Documentation for the API. |
 | `try` | object | A sample request: `method` (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`), `path` (starts with `/`) and optional JSON `body`. |
 
+## `sandbox`
+
+An app installed from a package runs confined, so code an AI just wrote can't do much harm if it is wrong or tricked. The defaults:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `read_only_root` | `true` | Root filesystem read-only. `/tmp`, `/run` and `/var/tmp` stay writable (in memory, 64 MB each). |
+| `egress` | `false` | Outbound connections. Off, the app reaches only the gateway: no internet, no other apps. Turn on for apps that call outside APIs, browse the web, or use a database elsewhere. |
+| `run_as_root` | `false` | An image that runs as root runs as user 65534 (nobody) instead. Images with their own non-root user keep it. |
+| `pids_limit` | `256` | Most processes and threads. |
+| `capabilities` | `[]` | Linux capabilities added back after all are dropped, e.g. `NET_BIND_SERVICE` to listen below port 1024. `ALL` and `SYS_ADMIN` are refused. |
+| `networks` | `[]` | Other Docker networks to join, e.g. the one your PostgreSQL container is on. |
+
+Apps also get `no-new-privileges` and, without `resources.memory`, a 1 GiB memory limit.
+
+```yaml
+sandbox:
+  egress: true                 # it browses the web
+  capabilities: [NET_BIND_SERVICE]
+```
+
+**Its own network.** On Docker, each app gets a network shared only with the gateway (`amoeba-app-<name>`), so no app can reach another app's port and skip the gateway's checks. Apps with `egress` also join `amoeba-egress`, where containers cannot reach each other.
+
+Each network takes an address range from Docker's default pools, which allow about 30 bridge networks per host. For more apps, give Docker smaller ranges in `/etc/docker/daemon.json` and restart it:
+
+```json
+{ "default-address-pools": [{ "base": "10.200.0.0/16", "size": 24 }] }
+``` Compose apps' `amoeba-net` network is renamed to it at install. On a Mac with Apple containers, each app gets a host-only network. Services written by hand into `services.json`, and apps installed before this, keep the shared network and no sandbox until reinstalled.
+
+## Verifying the caller
+
+The gateway sends an app the caller's identity as `x-amoeba-user`, `x-amoeba-org` and `x-amoeba-roles`, and signed, as `x-amoeba-identity`: an EdDSA (Ed25519) JWT with `sub`, `org_id`, `roles`, `aud` (the app's service name), `iss: amoeba` and a five-minute `exp`. An app that makes access decisions should verify it rather than trust the plain headers, which anyone who reaches the app directly could send. Every app container has what it needs:
+
+- `AMOEBA_IDENTITY_PUBLIC_KEY`: the gateway's Ed25519 public key, base64url without padding.
+- `AMOEBA_SERVICE_NAME`: the app's own name, the expected `aud`.
+
+```js
+import { jwtVerify, importJWK } from 'jose';
+const key = await importJWK({ kty: 'OKP', crv: 'Ed25519', x: process.env.AMOEBA_IDENTITY_PUBLIC_KEY }, 'EdDSA');
+const { payload } = await jwtVerify(req.headers['x-amoeba-identity'], key, {
+  audience: process.env.AMOEBA_SERVICE_NAME, issuer: 'amoeba',
+});
+// payload.sub, payload.org_id, payload.roles
+```
+
+The database service does this and refuses requests without a valid token.
+
 ## Calling other services
 
 An app that uses another Amoeba service, such as a Playwright or Stagehand scraper that drives a hosted Lightpanda browser, should call it through the gateway as the person or agent that called the app:
@@ -265,6 +324,7 @@ An install is refused, with a `400` naming the problem, when:
 - an env field has an unknown `type`, empty `options`, or a `default` that does not match its `type` or `options`;
 - an `interface` path does not start with `/`, `try.method` is not an HTTP method, or `docs` is not an http(s) URL;
 - a `calls` entry is empty, contains `/`, or names the app itself;
+- a `sandbox` field is unknown, `pids_limit` is outside 16 to 65536, or `capabilities` adds `ALL`, `SYS_ADMIN` or a malformed name;
 - an `app.command` entry is empty or has a `${...}` other than `${PORT}`, or an image app's `schema` declares `PORT`;
 - an `operation_rules` path pattern is invalid (for example `**` not at the end);
 - a required secret is missing, a secret fails its `validation_pattern`, a required env value without a default is missing, an env value does not match its `type` or `options`, or the installer sends an env value or secret the manifest does not declare.

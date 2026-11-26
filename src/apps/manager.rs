@@ -93,7 +93,14 @@ impl From<zip::result::ZipError> for AppManagerError {
 pub struct AppManager {
     catalog_path: PathBuf,
     age_identity: Option<age::x25519::Identity>,
-    lock: Mutex<()>,
+}
+
+/// Serializes catalog writes across the whole process. Each request builds
+/// its own `AppManager`, so a per-instance lock would not stop two of them
+/// (an install and a settings change, say) from overwriting each other.
+fn catalog_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 impl AppManager {
@@ -108,7 +115,6 @@ impl AppManager {
         Self {
             catalog_path: catalog_path.as_ref().to_path_buf(),
             age_identity: identity,
-            lock: Mutex::new(()),
         }
     }
 
@@ -186,7 +192,20 @@ impl AppManager {
             }
             fs::create_dir_all(&stack_dir)?;
             let dst = stack_dir.join("compose.yaml");
-            fs::copy(&src, &dst)?;
+            let compose = fs::read_to_string(&src)?;
+            // Sandboxed apps share a network with the gateway only. Without a
+            // gateway container to attach, the stack stays on the shared one.
+            let compose = if crate::lifecycle::sandbox::gateway_container().is_some() {
+                crate::lifecycle::sandbox::isolate_compose_network(
+                    &compose,
+                    &crate::lifecycle::sandbox::network_name(&app_name),
+                    manifest.sandbox.as_ref().is_some_and(|s| s.egress),
+                )
+                .map_err(AppManagerError::Validation)?
+            } else {
+                compose
+            };
+            fs::write(&dst, compose)?;
 
             let env = resolved_env(&manifest, &values);
             if !env.is_empty() {
@@ -214,7 +233,7 @@ impl AppManager {
         }
 
         // Update catalog under the mutex.
-        let _guard = self.lock.lock().await;
+        let _guard = catalog_lock().lock().await;
         let mut catalog = load_catalog(&self.catalog_path)?;
         upsert_machine(&mut catalog);
         let existing = catalog.services.get(&app_name);
@@ -255,7 +274,7 @@ impl AppManager {
     /// Removes an app from the catalog and cleans up its stack/secrets. Also
     /// attempts to stop any running containers.
     pub async fn uninstall(&self, app_name: &str) -> Result<(), AppManagerError> {
-        let _guard = self.lock.lock().await;
+        let _guard = catalog_lock().lock().await;
 
         let mut catalog = load_catalog(&self.catalog_path)?;
         let service = catalog.services.remove(app_name).ok_or_else(|| {
@@ -309,7 +328,7 @@ impl AppManager {
         app_name: &str,
         patch: PolicyPatch,
     ) -> Result<ServiceConfig, AppManagerError> {
-        let _guard = self.lock.lock().await;
+        let _guard = catalog_lock().lock().await;
         let mut catalog = load_catalog(&self.catalog_path)?;
         let service = catalog.services.get_mut(app_name).ok_or_else(|| {
             AppManagerError::Validation(format!("app '{app_name}' is not installed"))
@@ -335,6 +354,22 @@ impl AppManager {
         Ok(updated)
     }
 
+    /// Records an MCP app's approved and changed tools.
+    pub async fn set_tool_pins(
+        &self,
+        app_name: &str,
+        pins: crate::config::schema::ToolPins,
+    ) -> Result<(), AppManagerError> {
+        let _guard = catalog_lock().lock().await;
+        let mut catalog = load_catalog(&self.catalog_path)?;
+        let service = catalog.services.get_mut(app_name).ok_or_else(|| {
+            AppManagerError::Validation(format!("app '{app_name}' is not installed"))
+        })?;
+        service.tools = Some(pins);
+        save_catalog(&self.catalog_path, &catalog)?;
+        Ok(())
+    }
+
     /// Changes an installed app's settings and keeps them for reinstalls.
     /// Returns whether its container must restart for them to apply (memory
     /// or CPU changed).
@@ -343,7 +378,7 @@ impl AppManager {
         app_name: &str,
         settings: AppOverrides,
     ) -> Result<bool, AppManagerError> {
-        let _guard = self.lock.lock().await;
+        let _guard = catalog_lock().lock().await;
         let mut catalog = load_catalog(&self.catalog_path)?;
         let service = catalog.services.get_mut(app_name).ok_or_else(|| {
             AppManagerError::Validation(format!("app '{app_name}' is not installed"))
@@ -437,6 +472,9 @@ pub(crate) fn validate_manifest(manifest: &AppManifest) -> Result<(), AppManager
 
     if let Some(interface) = &manifest.interface {
         interface.validate().map_err(AppManagerError::Validation)?;
+    }
+    if let Some(sandbox) = &manifest.sandbox {
+        sandbox.validate().map_err(AppManagerError::Validation)?;
     }
     if let Some(bad) = manifest
         .calls
@@ -863,6 +901,9 @@ fn build_service_config(
         local_upstream: manifest.local_upstream,
         interface: manifest.interface.clone(),
         calls: manifest.calls.clone(),
+        sandbox: Some(manifest.sandbox.clone().unwrap_or_default()),
+        rate_limit_per_minute: manifest.rate_limit_per_minute,
+        tools: None,
         source: None,
         overrides: None,
     }
@@ -907,6 +948,36 @@ async fn stop_service_containers(
                 warn!(app = %app_name, "docker {} failed: {}", cmd[0], stderr);
             }
         }
+    }
+    // Apple containers (macOS native mode): the container and its network.
+    // Best effort; the CLI is absent elsewhere.
+    if service.container.is_some() && cfg!(target_os = "macos") {
+        let _ = Command::new("container")
+            .args(["delete", "--force", app_name])
+            .output()
+            .await;
+        let _ = Command::new("container")
+            .args([
+                "network",
+                "delete",
+                &crate::lifecycle::sandbox::network_name(app_name),
+            ])
+            .output()
+            .await;
+    }
+    // The app's own network, if it had one. Best effort: absent is fine.
+    if service.sandbox.is_some() {
+        let network = crate::lifecycle::sandbox::network_name(app_name);
+        if let Some(gateway) = crate::lifecycle::sandbox::gateway_container() {
+            let _ = Command::new("docker")
+                .args(["network", "disconnect", "-f", &network, &gateway])
+                .output()
+                .await;
+        }
+        let _ = Command::new("docker")
+            .args(["network", "rm", &network])
+            .output()
+            .await;
     }
     Ok(())
 }
@@ -1030,6 +1101,8 @@ pub fn spawn_readiness_probe(state: Arc<AppState>, app_name: String) {
 
         app_state.transition(LifecycleStatus::Ready, None);
         info!(app = %app_name, "app is ready");
+        // An MCP app's tools are pinned the first time it is ready.
+        crate::apps::tools::pin_on_first_ready(&state, &app_name).await;
     });
 }
 
@@ -1235,30 +1308,10 @@ pub fn ports_from_image_config(config: &serde_json::Value) -> Vec<u16> {
 /// inspect` or, for Apple containers, `container image inspect`. Empty when
 /// the image cannot be inspected.
 async fn image_ports(image: &str, apple: bool) -> Vec<u16> {
-    let program = if apple { "container" } else { "docker" };
-    let Ok(output) = Command::new(program)
-        .args(["image", "inspect", image])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+    crate::lifecycle::sandbox::image_config(image, apple)
         .await
-    else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return Vec::new();
-    };
-    let first = json.get(0).unwrap_or(&json);
-    // Docker: `[{"Config": {...}}]`. Apple: `[{"variants": [{"config": {"config": {...}}}]}]`.
-    let config = first.get("Config").or_else(|| {
-        first
-            .get("variants")
-            .and_then(|v| v.get(0))
-            .and_then(|v| v.get("config"))
-            .and_then(|c| c.get("config"))
-    });
-    config.map(ports_from_image_config).unwrap_or_default()
+        .map(|config| ports_from_image_config(&config))
+        .unwrap_or_default()
 }
 
 async fn local_image_present(image: &str) -> bool {
@@ -2118,6 +2171,60 @@ permissions:
             )
             .await
             .unwrap();
+    }
+
+    // @lat: [[gateway#Sandbox#Defaults for new installs]]
+    #[tokio::test]
+    async fn installs_are_sandboxed_by_default_and_can_relax_it() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog_path = temp_dir.path().join("services.json");
+        let manager = AppManager::new(&catalog_path);
+        let values = || InstallValues {
+            secrets: HashMap::from([("TOKEN".to_string(), "secret123".to_string())]),
+            replace: true,
+            ..Default::default()
+        };
+        let sandbox = || {
+            load_catalog(&catalog_path).unwrap().services["test-image"]
+                .sandbox
+                .clone()
+                .unwrap()
+        };
+
+        manager
+            .install(&package_zip_with_manifest(image_manifest()), values())
+            .await
+            .unwrap();
+        assert_eq!(sandbox(), crate::config::schema::Sandbox::default());
+        assert!(sandbox().read_only_root && !sandbox().egress && !sandbox().run_as_root);
+
+        let relaxed = format!(
+            "{}sandbox:\n  egress: true\n  read_only_root: false\n  capabilities: [NET_BIND_SERVICE]\n",
+            image_manifest()
+        );
+        manager
+            .install(&package_zip_with_manifest(&relaxed), values())
+            .await
+            .unwrap();
+        assert!(sandbox().egress && !sandbox().read_only_root);
+        assert_eq!(sandbox().capabilities, ["NET_BIND_SERVICE"]);
+
+        for bad in [
+            "sandbox:\n  capabilities: [SYS_ADMIN]\n",
+            "sandbox:\n  capabilities: [ALL]\n",
+            "sandbox:\n  pids_limit: 1\n",
+            "sandbox:\n  networks: [\"a b\"]\n",
+            "sandbox:\n  privileged: true\n",
+        ] {
+            let manifest = format!("{}{bad}", image_manifest());
+            assert!(
+                manager
+                    .install(&package_zip_with_manifest(&manifest), values())
+                    .await
+                    .is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]

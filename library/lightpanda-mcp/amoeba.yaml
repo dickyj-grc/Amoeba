@@ -22,6 +22,10 @@ permissions:
   read: [admin, mcp:lightpanda]
   add: [admin, mcp:lightpanda]
   delete: [admin, mcp:lightpanda]
+# It browses the web, so it needs outbound access; the rest of the sandbox
+# (read-only root, no capabilities, its own non-root user) stays on.
+sandbox:
+  egress: true
 resources:
   memory: 1Gi
 interface:

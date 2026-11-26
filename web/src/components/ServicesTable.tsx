@@ -11,6 +11,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ServiceItem } from '../types/amoeba';
+import { api } from '../api/client';
 import { interfaceLabel } from '../lib/library';
 
 interface ServicesTableProps {
@@ -34,6 +35,19 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [deletingName, setDeletingName] = useState<string | null>(null);
+  const [approvingName, setApprovingName] = useState<string | null>(null);
+
+  const handleApproveTools = async (name: string) => {
+    setApprovingName(name);
+    try {
+      await api.approveTools(name);
+      onRefresh();
+    } catch (err: any) {
+      window.console.error(err);
+    } finally {
+      setApprovingName(null);
+    }
+  };
 
   const filteredServices = services.filter((s) =>
     s.name.toLowerCase().includes(searchTerm.toLowerCase())
@@ -168,6 +182,22 @@ export const ServicesTable: React.FC<ServicesTableProps> = ({
                       <p className="mt-1 max-w-xs text-[11px] leading-snug text-red-400/90 break-words">
                         {service.state.error}
                       </p>
+                    )}
+                    {service.tools && service.tools.changed.length > 0 && (
+                      <div className="mt-1 max-w-xs text-[11px] leading-snug text-amber-400">
+                        <span>
+                          Tools changed since approval, blocked: {service.tools.changed.join(', ')}.{' '}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleApproveTools(service.name)}
+                          disabled={approvingName === service.name}
+                          className="font-medium underline hover:text-amber-300 disabled:opacity-50"
+                          title="Review the app's tool descriptions first: a changed description can steer agents."
+                        >
+                          {approvingName === service.name ? 'Approving...' : 'Approve current tools'}
+                        </button>
+                      </div>
                     )}
                   </td>
                   <td className="py-3.5 px-4">

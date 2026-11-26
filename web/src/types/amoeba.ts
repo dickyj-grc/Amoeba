@@ -22,6 +22,14 @@ export interface AppSettings {
   memory?: string;
   cpu_cores?: number;
   cooldown_seconds?: number;
+  /** Requests each caller may make per minute; 0 is unlimited. */
+  rate_limit_per_minute?: number;
+}
+
+/** An MCP app's pinned tools: approved, and blocked because new or changed. */
+export interface ToolsStatus {
+  approved: string[];
+  changed: string[];
 }
 
 export interface ServiceItem {
@@ -36,6 +44,7 @@ export interface ServiceItem {
   source?: AppSource;
   /** Current settings, every field set. */
   settings?: AppSettings;
+  tools?: ToolsStatus;
 }
 
 export interface AppsListResponse {
@@ -60,6 +69,7 @@ export interface AppStatusResponse {
   interface?: AppInterface;
   source?: AppSource;
   settings?: AppSettings;
+  tools?: ToolsStatus;
 }
 
 export interface LoginResponse {

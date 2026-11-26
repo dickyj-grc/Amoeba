@@ -140,6 +140,24 @@
         }
       }
     },
+    "sandbox": {
+      "type": "object",
+      "description": "How the app's containers are confined. Defaults: read-only root (writable /tmp, /run, /var/tmp), no Linux capabilities, root images run as user 65534, 256 processes, 1 GiB memory if none declared, and no outbound network.",
+      "additionalProperties": false,
+      "properties": {
+        "read_only_root": { "type": "boolean", "default": true },
+        "egress": { "type": "boolean", "default": false, "description": "Allow outbound connections (the internet, an outside database)." },
+        "run_as_root": { "type": "boolean", "default": false, "description": "Keep a root image running as root." },
+        "pids_limit": { "type": "integer", "minimum": 16, "maximum": 65536, "default": 256 },
+        "capabilities": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z_]+$" }, "description": "Linux capabilities added back, e.g. NET_BIND_SERVICE. Not ALL or SYS_ADMIN." },
+        "networks": { "type": "array", "items": { "type": "string" }, "description": "Other Docker networks to join, e.g. one holding the app's database." }
+      }
+    },
+    "rate_limit_per_minute": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Requests each caller may make per minute; 0 is unlimited. Default: the gateway's (600)."
+    },
     "calls": {
       "type": "array",
       "description": "Other services this app calls on behalf of its caller; requests then carry x-amoeba-caller-token, valid only on these services.",
@@ -171,7 +189,7 @@
   "$defs": {
     "permissions": {
       "type": "object",
-      "description": "Operation (read, add, update, delete, or a name from operation_rules) to the roles allowed. Console tokens carry the role mcp:<name>.",
+      "description": "Operation (read, add, update, delete, a name from operation_rules, or tool:<name> / tool:* for MCP tool calls) to the roles allowed. Console tokens carry the role mcp:<name>.",
       "additionalProperties": { "type": "array", "items": { "type": "string" } }
     }
   }

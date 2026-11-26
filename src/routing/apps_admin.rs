@@ -188,6 +188,25 @@ pub struct AppStatusResponse {
     /// The settings changed from the manifest's, kept across reinstalls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overrides: Option<AppOverrides>,
+    /// An MCP app's pinned tools: approved names, and those blocked because
+    /// they are new or changed since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolsStatus>,
+}
+
+#[derive(Serialize)]
+pub struct ToolsStatus {
+    pub approved: Vec<String>,
+    pub changed: Vec<String>,
+}
+
+impl From<&crate::config::schema::ToolPins> for ToolsStatus {
+    fn from(pins: &crate::config::schema::ToolPins) -> Self {
+        ToolsStatus {
+            approved: pins.approved.keys().cloned().collect(),
+            changed: pins.changed.keys().cloned().collect(),
+        }
+    }
 }
 
 /// What the gateway knows about the running workload.
@@ -249,6 +268,10 @@ fn app_status(state: &AppState, app_name: String) -> AppStatusResponse {
         settings: service.as_ref().map(AppOverrides::current),
         source: service.as_ref().and_then(|s| s.source.clone()),
         overrides: service.as_ref().and_then(|s| s.overrides.clone()),
+        tools: service
+            .as_ref()
+            .and_then(|s| s.tools.as_ref())
+            .map(ToolsStatus::from),
         interface: service.and_then(|s| s.interface),
     }
 }
@@ -282,6 +305,39 @@ pub async fn update_app_policy(
         .map_err(map_manager_error)?;
     reload_catalog(&state);
     Ok(Json(app_status(&state, app_name)))
+}
+
+/// `GET /admin/apps/<name>/tools`: the pinned tools and any blocked changes.
+pub async fn get_app_tools(
+    State(state): State<Arc<AppState>>,
+    Path(app_name): Path<String>,
+) -> Result<Json<ToolsStatus>, (StatusCode, String)> {
+    let catalog = state.catalog.load();
+    let service = catalog.services.get(&app_name).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("app '{app_name}' is not installed"),
+    ))?;
+    let pins = service.tools.clone().unwrap_or_default();
+    Ok(Json(ToolsStatus::from(&pins)))
+}
+
+/// `POST /admin/apps/<name>/tools/approve`: reads the app's current tool list
+/// (starting it if needed) and approves it as is.
+pub async fn approve_app_tools(
+    State(state): State<Arc<AppState>>,
+    Path(app_name): Path<String>,
+) -> Result<Json<ToolsStatus>, (StatusCode, String)> {
+    if !state.catalog.load().services.contains_key(&app_name) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("app '{app_name}' is not installed"),
+        ));
+    }
+    let pins = crate::apps::tools::approve(&state, &app_name)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    tracing::info!(app = %app_name, tools = pins.approved.len(), "admin approved the MCP tool list");
+    Ok(Json(ToolsStatus::from(&pins)))
 }
 
 /// Changes an app's settings. Memory and CPU need a new container, so a

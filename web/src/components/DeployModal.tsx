@@ -78,6 +78,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [cooldown, setCooldown] = useState(300);
   const [isPublic, setIsPublic] = useState(true);
   const [localUpstream, setLocalUpstream] = useState(false);
+  const [allowInternet, setAllowInternet] = useState(false);
   const [envPairs, setEnvPairs] = useState<EnvPair[]>([
     { key: 'PORT', value: '8080', isSecret: false },
   ]);
@@ -202,6 +203,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         cooldownSeconds: Number(cooldown),
         isPublic,
         localUpstream,
+        allowInternet,
         envPairs,
         replace: Boolean(existing),
       });
@@ -497,6 +499,21 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                   <span className="block text-[11px] text-muted-foreground">
                     Drops the browser's Origin and sends Host: localhost. Turn on for apps that only
                     accept local callers, such as MCP servers (Lightpanda: "Origin not allowed").
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allowInternet}
+                  onChange={(e) => setAllowInternet(e.target.checked)}
+                  className="mt-0.5 rounded border-input text-primary focus:ring-ring h-4 w-4 bg-background"
+                />
+                <span>
+                  <span className="font-medium text-foreground">Allow outbound internet</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    Off, the app reaches only the gateway. Turn on for apps that call outside APIs,
+                    browse the web, or use a database elsewhere.
                   </span>
                 </span>
               </label>

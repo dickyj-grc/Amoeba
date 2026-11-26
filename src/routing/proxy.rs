@@ -3,20 +3,21 @@
 use super::operation::{AccessDeny, authorize, resolve_operation};
 use crate::apps::manager::not_ready_message;
 use crate::apps::state::AppLifecycleState;
+use crate::apps::tools;
 use crate::auth::Claims;
-use crate::auth::delegation;
 use crate::auth::middleware::verify_request_token;
+use crate::auth::{delegation, identity};
 use crate::capacity::limiter::{fits_within_budget, sum_resource_usage};
 use crate::config::schema::ServiceConfig;
 use crate::lifecycle::container::{
     ServiceRuntimeState, is_occupying_capacity, now_unix, wait_until_ready,
 };
 use crate::metering::telemetry::emit_usage_telemetry;
-use crate::routing::websocket;
+use crate::routing::{ratelimit, resource_metadata, websocket};
 use crate::state::AppState;
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{ConnectInfo, Path, Request, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION, header::HOST,
         header::ORIGIN,
@@ -24,6 +25,7 @@ use axum::{
     response::Response,
 };
 use futures_util::StreamExt;
+use std::net::SocketAddr;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Instant;
 use tracing::{error, info};
@@ -123,6 +125,7 @@ fn is_gateway_identity_header(name: &HeaderName) -> bool {
     lower == "x-amoeba-org"
         || lower == "x-amoeba-user"
         || lower == delegation::CALLER_TOKEN_HEADER
+        || lower == identity::IDENTITY_HEADER
         || lower == "x-amoeba-roles"
         || lower.starts_with("x-amoeba-secret-")
 }
@@ -176,7 +179,7 @@ pub fn secret_header_name(key: &str) -> String {
     format!("x-amoeba-secret-{}", key.to_ascii_lowercase())
 }
 
-fn apply_proxy_secrets(
+pub fn apply_proxy_secrets(
     mut outbound_req: reqwest::RequestBuilder,
     service_cfg: &ServiceConfig,
 ) -> Result<reqwest::RequestBuilder, String> {
@@ -251,14 +254,16 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 pub async fn proxy_handler_root(
     state: State<Arc<AppState>>,
     Path(service_name): Path<String>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     req: Request,
 ) -> Result<Response, StatusCode> {
-    proxy_handler(state, Path((service_name, String::new())), req).await
+    proxy_handler(state, Path((service_name, String::new())), peer, req).await
 }
 
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     Path((service_name, subpath)): Path<(String, String)>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     mut req: Request,
 ) -> Result<Response, StatusCode> {
     let start_time = Instant::now();
@@ -312,7 +317,18 @@ pub async fn proxy_handler(
     let claims: Option<Claims> = if service_cfg.public {
         None
     } else {
-        Some(verify_request_token(&state.jwt_engine, req.headers()).await?)
+        match verify_request_token(&state.jwt_engine, req.headers()).await {
+            Ok(claims) => Some(claims),
+            // Points MCP clients at where to get a token (RFC 9728).
+            Err(StatusCode::UNAUTHORIZED) => {
+                return Ok(resource_metadata::unauthorized(
+                    req.headers(),
+                    &service_name,
+                    &subpath,
+                ));
+            }
+            Err(status) => return Err(status),
+        }
     };
 
     // 3. Classify Operation: the service's operation_rules (method + subpath),
@@ -349,6 +365,72 @@ pub async fn proxy_handler(
             return Ok(rejection(StatusCode::FORBIDDEN, "delegation"));
         }
     }
+    // Per caller per service: the signed-in user, else the client address.
+    let per_minute = service_cfg
+        .rate_limit_per_minute
+        .unwrap_or_else(ratelimit::default_per_minute);
+    let caller_key = match &claims {
+        Some(claims) => format!("user:{}", claims.sub),
+        None => match ratelimit::client_address(peer.map(|p| p.0.ip()), req.headers()) {
+            Some(address) => format!("ip:{address}"),
+            None => "anonymous".to_string(),
+        },
+    };
+    if let Err(retry_after) = state
+        .limits
+        .allow_request(&format!("{service_name}|{caller_key}"), per_minute)
+    {
+        let mut response = rejection_with(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate-limit",
+            format!(
+                "more than {per_minute} requests a minute to '{service_name}'; retry in {retry_after}s"
+            ),
+        );
+        if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        return Ok(response);
+    }
+
+    // MCP tool calls: each needs the roles of its `tool:<name>` (or `tool:*`)
+    // entry too. The body is read here only for services that use tool rules
+    // or pinned tools, and forwarded unchanged below.
+    let mut early_body: Option<axum::body::Bytes> = None;
+    let mut called_tools: Vec<String> = Vec::new();
+    if req.method() == axum::http::Method::POST
+        && !websocket::is_websocket_upgrade(req.headers())
+        && tools::inspects_tool_calls(service_cfg)
+    {
+        let body = axum::body::to_bytes(std::mem::take(req.body_mut()), 10 * 1024 * 1024)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        called_tools = tools::tool_calls(&body);
+        early_body = Some(body);
+        if let Some(claims) = &claims {
+            for tool in &called_tools {
+                let Some(tool_op) = tools::tool_operation(service_cfg, tool) else {
+                    continue;
+                };
+                if authorize(service_cfg, claims, &tool_op).is_err() {
+                    info!(
+                        user = %claims.sub,
+                        service = %service_name,
+                        tool = %tool,
+                        "⛔ Tool call denied (403 Forbidden)"
+                    );
+                    return Ok(rejection_with(
+                        StatusCode::FORBIDDEN,
+                        "tool",
+                        format!("your roles may not call the tool '{tool}' on '{service_name}'"),
+                    ));
+                }
+            }
+        }
+    }
+
     // Who called, for the usage log: "alice", or "alice via scraper".
     let caller_label = match &claims {
         Some(Claims {
@@ -491,6 +573,33 @@ pub async fn proxy_handler(
         }
     }
 
+    // 5.9. Pinned MCP tools: a tool that is new or changed since an admin
+    // approved the list cannot be called. The list is read again after a
+    // start and every few minutes.
+    if !called_tools.is_empty() && service_cfg.tools.is_some() {
+        match tools::unapproved(&state, &service_name, service_cfg, !was_already_occupying).await {
+            Ok(pins) => {
+                if let Some(tool) = called_tools.iter().find(|t| !tools::is_approved(&pins, t)) {
+                    return Ok(rejection_with(
+                        StatusCode::FORBIDDEN,
+                        "tool-not-approved",
+                        format!(
+                            "the tool '{tool}' on '{service_name}' is new or changed since its tools were approved; an admin must approve the current list (POST /admin/apps/{service_name}/tools/approve)"
+                        ),
+                    ));
+                }
+            }
+            Err(message) => {
+                error!(service = %service_name, "cannot check the MCP tool list: {message}");
+                return Ok(rejection_with(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "tool-check-failed",
+                    format!("could not check the tools of '{service_name}': {message}"),
+                ));
+            }
+        }
+    }
+
     // 6. Build Upstream Request URL. `resolved_host` is populated whenever a
     // prior cold-boot (this request's or an earlier one, for an
     // already-warm service) resolved a dynamic host; otherwise falls back to
@@ -510,6 +619,14 @@ pub async fn proxy_handler(
     // The caller's org and user come from the verified token, never from
     // headers the client supplied (those were dropped above).
     outbound_req = apply_caller_identity(outbound_req, claims.as_ref());
+
+    // The same facts, signed, for apps that must not trust plain headers.
+    if let Some(claims) = &claims {
+        match identity::issue(claims, &service_name) {
+            Ok(token) => outbound_req = outbound_req.header(identity::IDENTITY_HEADER, token),
+            Err(message) => error!(service = %service_name, "{message}"),
+        }
+    }
 
     // An app that calls other services for its caller gets a token to do so
     // as that caller, limited to the services it declared.
@@ -583,9 +700,12 @@ pub async fn proxy_handler(
     }
 
     // Forward Request Payload Body
-    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body_bytes = match early_body {
+        Some(body) => body,
+        None => axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?,
+    };
 
     outbound_req = outbound_req.body(body_bytes);
 
@@ -674,6 +794,9 @@ mod tests {
             local_upstream: false,
             interface: None,
             calls: Vec::new(),
+            sandbox: None,
+            rate_limit_per_minute: None,
+            tools: None,
             source: None,
             overrides: None,
         }

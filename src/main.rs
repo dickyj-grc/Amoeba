@@ -11,16 +11,18 @@ use amoeba::config::settings::{
 };
 use amoeba::routing::admin::{create_user, delete_user, update_user};
 use amoeba::routing::apps_admin::{
-    build_app_image, build_status, cancel_build, get_app_status, get_library_entry, install_app,
-    install_from_library, issue_service_token, list_apps, list_library, list_service_tokens,
-    revoke_service_token, uninstall_app, update_app_policy, update_app_settings,
+    approve_app_tools, build_app_image, build_status, cancel_build, get_app_status, get_app_tools,
+    get_library_entry, install_app, install_from_library, issue_service_token, list_apps,
+    list_library, list_service_tokens, revoke_service_token, uninstall_app, update_app_policy,
+    update_app_settings,
 };
 use amoeba::routing::auth::{login, revoke};
 use amoeba::routing::proxy::{proxy_handler, proxy_handler_root};
+use amoeba::routing::resource_metadata;
 use amoeba::state::AppState;
 use axum::{
     Router, middleware,
-    routing::{any, post},
+    routing::{any, get, post},
 };
 use jsonwebtoken::{Algorithm, Validation};
 use std::sync::Arc;
@@ -152,6 +154,8 @@ async fn main() {
             "/apps/:name/settings",
             axum::routing::patch(update_app_settings),
         )
+        .route("/apps/:name/tools", get(get_app_tools))
+        .route("/apps/:name/tools/approve", post(approve_app_tools))
         .route(
             "/apps/:name/build",
             post(build_app_image).get(build_status).delete(cancel_build),
@@ -188,7 +192,23 @@ async fn main() {
     // Proxy routes handle their own auth inside proxy_handler, since whether a
     // token is required at all depends on the target service's "public" flag,
     // which isn't known until the service catalog has been consulted.
+    // MCP clients find who issues tokens for a service here (RFC 9728).
+    let servers = if config.auth.authorization_servers.is_empty() {
+        config.auth.issuer.iter().cloned().collect()
+    } else {
+        config.auth.authorization_servers.clone()
+    };
+    let _ = app_state.authorization_servers.set(servers);
+
     let app = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource/v1/:service_name",
+            get(resource_metadata::metadata_root),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/v1/:service_name/*subpath",
+            get(resource_metadata::metadata),
+        )
         .route("/v1/:service_name/", any(proxy_handler_root))
         .route("/v1/:service_name/*subpath", any(proxy_handler))
         .nest("/admin", admin_routes)
@@ -209,7 +229,13 @@ async fn main() {
     let bind_addr = config.server.bind_addr;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     info!("🚀 Amoeba Compute Orchestrator running on http://{bind_addr}");
-    axum::serve(listener, app).await.unwrap();
+    // The client's address feeds the sign-in and request rate limits.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 /// Sets up what the quick start needs on first run: an admin user and an
@@ -290,6 +316,7 @@ fn load_settings() -> Result<AmoebaConfig, String> {
             jwt_secret: Some(jwt_secret),
             users_file: DEFAULT_USERS_FILE.to_string(),
             revocation_file: DEFAULT_REVOCATION_FILE.to_string(),
+            authorization_servers: Vec::new(),
         },
     })
 }

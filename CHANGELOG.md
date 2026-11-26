@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Upgrade notes (security)
+
+- **New installs are sandboxed.** Apps installed from now on run with a read-only root filesystem (writable `/tmp`, `/run`, `/var/tmp`), no Linux capabilities, no root user (root images run as 65534), at most 256 processes, a 1 GiB memory limit if none is declared, and **no outbound network**. Apps that call the internet, browse, or reach a database elsewhere need `sandbox: { egress: true }` in their manifest, the console's *Allow outbound internet*, or `allow_internet` on amoeba-mcp's `deploy_service`. Bundled apps that need it (Lightpanda, Obscura, finance-db, streaming-echo) already declare it. Services installed before, and hand-written ones, are unchanged until reinstalled.
+- **Each app gets its own Docker network**, internal and shared only with the gateway, so apps can no longer reach each other directly. Apps with egress also join `amoeba-egress`, where they cannot reach each other either. An app that relied on calling another app by container name must go through the gateway (see `calls`), or list the network under `sandbox.networks`. Set `AMOEBA_SELF_CONTAINER` to the gateway's container name if you run it outside the provided compose files.
+- **About 30 apps per Docker host by default.** Each app's network takes an address range from Docker's default pools. For more, set smaller ranges with `default-address-pools` in `/etc/docker/daemon.json` (see the manifest reference's `sandbox` section).
+- **The database service requires a signed identity.** With this release's gateway, amoeba-db trusts only `x-amoeba-identity` and refuses requests without it. Update the gateway and amoeba-db together.
+- **Every app container is recreated once** on its next start, because each now receives `AMOEBA_IDENTITY_PUBLIC_KEY` and `AMOEBA_SERVICE_NAME`.
+- **Rate limits are on by default:** 600 requests a minute per caller per service (`AMOEBA_RATE_LIMIT_PER_MINUTE`, or `rate_limit_per_minute` per app; `0` is unlimited), and sign-ins lock for 15 minutes after 5 failures for an account or 20 from one address.
+
+### Security
+
+- **Gateway-only access.** Before, every app shared `amoeba-net`, so an AI-built app could call the database service directly with a made-up `x-amoeba-roles: admin` header and get past both the role check and column masking. Apps now get a network of their own, and the gateway signs the caller's identity (`x-amoeba-identity`, EdDSA, per service) for apps to verify; amoeba-db verifies it.
+- **Sandbox for AI-built apps**, on Docker and Apple containers (see the upgrade notes). The manifest's `sandbox` block relaxes it per app.
+- **Per-tool permissions for MCP apps:** `tool:<name>` (or `tool:*`) in `permissions`.
+- **Pinned MCP tool lists:** a tool that is new or reworded after approval is blocked until an admin approves the current list (console button, or `POST /admin/apps/<name>/tools/approve`).
+- **MCP sign-in discovery:** a 401 carries `WWW-Authenticate: Bearer resource_metadata=…`, and the gateway serves OAuth Protected Resource Metadata at `/.well-known/oauth-protected-resource/v1/<service>/…`. Set `auth.authorization_servers` (defaults to `auth.issuer`).
+- **Rate limits** on failed sign-ins and per caller per service.
+- **Catalog writes are serialized across requests.** Each admin request used its own lock, so two at once could overwrite each other.
+- **The amoeba-mcp guide no longer says secrets are "stored encrypted on disk".** They are plain files readable only by Amoeba.
+
 ### Upgrade notes
 
 - **Installing onto a taken name now fails with 409.** Before, it silently replaced the existing service. Send `replace: true` (in the package `values`, or the library install body) to replace or upgrade it. The MCP server's `deploy_service` tool takes `replace` too.

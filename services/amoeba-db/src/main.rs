@@ -7,10 +7,12 @@
 //! - `DB_DEFINITIONS_FILE`: path to the definitions JSON, re-read when it
 //!   changes; or `DB_DEFINITIONS`: the JSON itself.
 //! - `PORT` (default 8080).
+//! - `AMOEBA_IDENTITY_PUBLIC_KEY` and `AMOEBA_SERVICE_NAME`: set by Amoeba.
+//!   With both, callers must present a gateway-signed `x-amoeba-identity`.
 
 use amoeba_db::db::Db;
 use amoeba_db::defs::Definitions;
-use amoeba_db::{Service, router};
+use amoeba_db::{IdentityKey, Service, router};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tracing::{error, info};
@@ -95,7 +97,22 @@ async fn run() -> Result<(), String> {
         queries = defs.queries.len(),
         "loaded definitions"
     );
-    let svc = Service::new(Db::new(&read, &write)?, defs);
+    let identity_key = match (
+        env("AMOEBA_IDENTITY_PUBLIC_KEY"),
+        env("AMOEBA_SERVICE_NAME"),
+    ) {
+        (Some(key), Some(service)) => {
+            info!(%service, "callers must present a gateway-signed identity");
+            Some(IdentityKey::new(&key, &service)?)
+        }
+        _ => {
+            tracing::warn!(
+                "AMOEBA_IDENTITY_PUBLIC_KEY or AMOEBA_SERVICE_NAME is not set: trusting the plain x-amoeba-* headers, so this service must be reachable only from the gateway"
+            );
+            None
+        }
+    };
+    let svc = Service::with_identity_key(Db::new(&read, &write)?, defs, identity_key);
     if let Some(path) = path {
         watch_definitions(svc.clone(), path);
     }

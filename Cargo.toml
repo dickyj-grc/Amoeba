@@ -44,6 +44,10 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 uuid = { version = "1", features = ["v4"] }
 bollard = "0.17"
 base64 = "0.22"
+# Signing the identity token apps receive (x-amoeba-identity).
+ed25519-dalek = "2"
+# Fingerprints of MCP tool definitions, to pin them.
+sha2 = "0.10"
 schemars = "0.8"
 
 [dev-dependencies]

@@ -65,6 +65,82 @@ The caller's query string is passed to the app unchanged; before, the proxy sent
 
 [[src/routing/proxy.rs#with_query]] appends it to the upstream URL, for plain requests and WebSocket handshakes alike.
 
+## Signed identity for apps
+
+Every authenticated request also carries `x-amoeba-identity`, an EdDSA token with the caller's user, org and roles for that one service, so an app can verify who is calling instead of trusting plain headers.
+
+The plain `x-amoeba-user`/`-org`/`-roles` headers prove nothing to an app another app can reach directly: anyone can send them. [[src/auth/identity.rs#issue]] signs the token with an Ed25519 key kept in `/etc/amoeba/identity_key` (`AMOEBA_IDENTITY_KEY_FILE`), `aud` = the service, `iss` = `amoeba`, five minutes long. Every app container gets the public key as `AMOEBA_IDENTITY_PUBLIC_KEY` and its name as `AMOEBA_SERVICE_NAME` ([[src/lifecycle/sandbox.rs#identity_env]]). The database service requires the token once it has the key (see [[database#Gateway setup#Signed identity]]). A copy a caller sends is dropped.
+
+### Apps verify the gateway's signature
+
+A token verifies only with the gateway's public key and only for the service it names; one for another service, signed by another key, or made up with HMAC is refused.
+
+### Every request carries it
+
+Through the gateway an app receives a token naming the caller, not the forged copy the caller sent.
+
+## Gateway is the only way in
+
+Each sandboxed app gets a Docker network of its own, shared only with the gateway, so one app cannot reach another's port and skip the gateway's checks.
+
+Before this, every app shared `amoeba-net`, so an AI-built app could call the database service directly with made-up identity headers. [[src/lifecycle/docker_container.rs#DockerContainerDriver]] creates `amoeba-app-<name>`, always internal, and attaches the gateway's container to it (`AMOEBA_SELF_CONTAINER`, else its hostname). An app with egress also joins the shared `amoeba-egress` network, whose bridge has inter-container traffic off; the gateway never joins it. An earlier draft made egress apps' own networks non-internal, and Docker then picked one as the gateway's default route, so removing it cut the gateway's connections. Without a gateway container to attach (native mode), it falls back to the shared network with a warning. Apple containers get a host-only network per app instead. Services without a sandbox (written by hand, or installed before this) stay on the shared network until reinstalled. Uninstalling removes the network. Each network takes an address range from Docker's pools, which by default allow about 30 bridge networks per host.
+
+### Compose apps get their own network
+
+At install, a compose app's external `amoeba-net` network is renamed to the app's own ([[src/lifecycle/sandbox.rs#isolate_compose_network]]); the compose driver creates it and attaches the gateway before `up`.
+
+## Sandbox
+
+Apps installed from a package run confined unless their manifest relaxes it: the settings suit code an AI just wrote and nobody has reviewed.
+
+[[src/config/schema.rs#Sandbox]] holds them; both container drivers apply them. Apple containers get the same flags (`--read-only`, `--tmpfs`, `--cap-drop`, `--ulimit nproc`, `--user`) and a host-only network.
+
+### Defaults for new installs
+
+An install gets a read-only root, no outbound network, no root user and 256 processes unless the manifest's `sandbox` says otherwise; unsafe values (adding `ALL` or `SYS_ADMIN`, odd limits, unknown keys) are refused.
+
+### What the container gets
+
+A sandboxed Docker container has no capabilities beyond those listed, no privilege escalation, a read-only root and limits on processes and memory; a service without a sandbox gets none of this.
+
+Docker drops all capabilities, adds back only those listed, sets `no-new-privileges`, a read-only root with tmpfs `/tmp`, `/run` and `/var/tmp`, a process limit, a 1 GiB memory limit when none is declared, and user 65534 for images that run as root ([[src/lifecycle/sandbox.rs#run_as_user]]).
+
+## MCP sign-in discovery
+
+A 401 from a service carries `WWW-Authenticate: Bearer resource_metadata="…"`, and the gateway serves OAuth Protected Resource Metadata (RFC 9728) per service, as the MCP authorization spec requires.
+
+[[src/routing/resource_metadata.rs#metadata]] answers `/.well-known/oauth-protected-resource/v1/<service>/<path>` with the `resource`, `bearer_methods_supported` and `authorization_servers` (config `auth.authorization_servers`, else `auth.issuer`). The origin follows `X-Forwarded-Proto`/`-Host` ([[src/routing/resource_metadata.rs#public_origin]]). Amoeba is not an authorization server itself; in local mode no servers are listed and clients use issued tokens.
+
+## MCP tools
+
+The gateway reads JSON-RPC `tools/call` requests to an MCP app, so permissions can differ per tool and a tool that changes after approval is blocked.
+
+[[src/apps/tools.rs]] does both. The body is read early only for services with `tool:` permissions or pinned tools, and forwarded unchanged.
+
+### Per-tool permissions
+
+A call to tool `x` also needs the roles under `tool:x` (else `tool:*`), on top of the request's own operation, in one request or a batch; so analysts may search invoices while only admins delete them.
+
+### Changed tools are blocked
+
+The gateway fingerprints an MCP app's tools when it is first ready and reads them again after each start and every five minutes; a reworded or new tool is refused (403 `tool-not-approved`) until an admin approves the current list.
+
+Fingerprints are SHA-256 of each tool's JSON ([[src/apps/tools.rs#fingerprint]]), kept in the catalog as [[src/config/schema.rs#ToolPins]]. `GET /admin/apps/<name>/tools` shows them and `POST /admin/apps/<name>/tools/approve` approves; the console shows changed tools with an Approve button. Reinstalling an app re-pins its tools, since a reinstall is itself an admin's decision.
+
+## Rate limits
+
+Failed sign-ins are limited per account and per client address, and requests per caller per service, in the gateway's memory.
+
+[[src/routing/ratelimit.rs#Limits]] keeps both. The client address is the peer, or the first `X-Forwarded-For` entry when the peer is a local or private-network proxy ([[src/routing/ratelimit.rs#client_address]]).
+
+### Per caller per service
+
+Each signed-in user (or client address, for public services) may make 600 requests a minute to a service by default (`AMOEBA_RATE_LIMIT_PER_MINUTE`, or the service's `rate_limit_per_minute`; 0 is unlimited), then gets 429 with `Retry-After`.
+
+### Failed sign-ins
+
+After five failed sign-ins for an account (or twenty from one address) in fifteen minutes, `POST /auth/login` answers 429 with `Retry-After`, even for the right password; a success clears the account's count.
+
 ## Calls for the caller
 
 An app that declares `calls` gets `x-amoeba-caller-token` on each request: the caller's identity, usable only on those services, so a downstream service checks the original caller's roles.

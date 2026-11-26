@@ -111,6 +111,7 @@ Deploy a microservice to Amoeba.
 | `memory` | string | no | Memory limit (e.g. `512Mi`) |
 | `cpu_cores` | integer | no | CPU core limit |
 | `readiness_timeout_secs` | integer | no | Max wait for readiness (default 120) |
+| `allow_internet` | boolean | no | Let the app open outbound connections (the internet, an outside database). Off by default: the app reaches only the gateway |
 | `calls` | array | no | Other Amoeba services this app calls for its caller, e.g. `["lightpanda"]`. Each request then carries `x-amoeba-caller-token`; send it as `Authorization: Bearer <token>` when calling those services through the gateway, so they check the original caller's roles |
 | `replace` | boolean | no | Replace an existing service with this name; without it, a taken name fails |
 

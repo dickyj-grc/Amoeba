@@ -25,6 +25,8 @@ services:
     restart: unless-stopped
     environment:
       - AMOEBA_LOCAL_JWT_SECRET=${AMOEBA_LOCAL_JWT_SECRET:?set AMOEBA_LOCAL_JWT_SECRET in your .env file}
+      # Each app gets a network shared only with this container, which joins it.
+      - AMOEBA_SELF_CONTAINER=amoeba-orchestrator
       - RUST_LOG=info
     volumes:
       # Mount configuration files (relative to this file, wherever the repo is cloned)

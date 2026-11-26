@@ -418,6 +418,20 @@ pub struct ServiceConfig {
     /// (`x-amoeba-caller-token`). See [`crate::auth::delegation`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,
+    /// How the app's containers are confined. Set for apps installed from a
+    /// package (with defaults when the manifest says nothing); absent for
+    /// services written by hand and apps installed before sandboxing, which
+    /// keep running as before. See [`Sandbox`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Sandbox>,
+    /// The MCP tools an admin approved, and any that changed since. Set for
+    /// MCP apps once their tool list is first read. See [`ToolPins`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolPins>,
+    /// Requests each caller may make per minute; `0` is unlimited. Unset
+    /// uses the gateway's default (`AMOEBA_RATE_LIMIT_PER_MINUTE`, 600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<u32>,
     /// Where the app was installed from, so a reinstall can tell an upgrade
     /// of the same app from a different app taking its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -426,6 +440,104 @@ pub struct ServiceConfig {
     /// is reinstalled or upgraded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<AppOverrides>,
+}
+
+/// Confinement for an app's containers. The defaults suit an app an AI just
+/// wrote: no Linux capabilities, a read-only root filesystem (with writable
+/// `/tmp`), no root user, a process cap, and no outbound network. Each can be
+/// relaxed in the manifest's `sandbox` block.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Sandbox {
+    /// Root filesystem read-only; `/tmp`, `/run` and `/var/tmp` stay writable.
+    #[serde(default = "sandbox_true")]
+    pub read_only_root: bool,
+    /// Outbound connections beyond the gateway, e.g. to the internet or a
+    /// database elsewhere. Off by default.
+    #[serde(default)]
+    pub egress: bool,
+    /// Keep an image that runs as root as root. Off by default: such images
+    /// run as user 65534 (nobody). Images with their own non-root user keep it.
+    #[serde(default)]
+    pub run_as_root: bool,
+    /// Most processes (threads included) the container may run.
+    #[serde(default = "sandbox_pids_limit")]
+    pub pids_limit: u32,
+    /// Linux capabilities added back after all are dropped, e.g.
+    /// `NET_BIND_SERVICE` to listen on a port below 1024.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Other Docker networks to join, e.g. one holding the database the app
+    /// uses. Each app otherwise has a network of its own, shared only with
+    /// the gateway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<String>,
+}
+
+fn sandbox_true() -> bool {
+    true
+}
+
+fn sandbox_pids_limit() -> u32 {
+    256
+}
+
+impl Default for Sandbox {
+    fn default() -> Self {
+        Sandbox {
+            read_only_root: true,
+            egress: false,
+            run_as_root: false,
+            pids_limit: sandbox_pids_limit(),
+            capabilities: Vec::new(),
+            networks: Vec::new(),
+        }
+    }
+}
+
+impl Sandbox {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(16..=65_536).contains(&self.pids_limit) {
+            return Err("sandbox.pids_limit must be between 16 and 65536".into());
+        }
+        if let Some(bad) = self
+            .capabilities
+            .iter()
+            .find(|c| c.is_empty() || !c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_'))
+        {
+            return Err(format!(
+                "sandbox.capabilities: '{bad}' is not a capability name like NET_BIND_SERVICE"
+            ));
+        }
+        if self
+            .capabilities
+            .iter()
+            .any(|c| c == "ALL" || c == "SYS_ADMIN")
+        {
+            return Err("sandbox.capabilities may not add ALL or SYS_ADMIN".into());
+        }
+        if let Some(bad) = self.networks.iter().find(|n| {
+            n.is_empty()
+                || !n
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch))
+        }) {
+            return Err(format!("sandbox.networks: '{bad}' is not a network name"));
+        }
+        Ok(())
+    }
+}
+
+/// An MCP app's tools as approved: name -> SHA-256 of the tool's definition
+/// (description, input schema, annotations). A tool whose definition later
+/// differs, or a new one, is listed in `changed` and cannot be called until
+/// an admin approves the current list. This stops a server from quietly
+/// rewording a tool to steer agents ("tool poisoning") or adding new ones.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+pub struct ToolPins {
+    pub approved: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub changed: std::collections::BTreeMap<String, String>,
 }
 
 /// Where an installed app came from.
@@ -480,6 +592,9 @@ pub struct AppOverrides {
     /// Idle seconds before the app is stopped; `0` keeps it running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooldown_seconds: Option<u64>,
+    /// Requests each caller may make per minute; `0` is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<u32>,
 }
 
 impl AppOverrides {
@@ -504,6 +619,9 @@ impl AppOverrides {
         if newer.cooldown_seconds.is_some() {
             self.cooldown_seconds = newer.cooldown_seconds;
         }
+        if newer.rate_limit_per_minute.is_some() {
+            self.rate_limit_per_minute = newer.rate_limit_per_minute;
+        }
     }
 
     /// Writes the set fields into `service`.
@@ -516,6 +634,9 @@ impl AppOverrides {
         }
         if let Some(seconds) = self.cooldown_seconds {
             service.placement.cooldown_seconds = (seconds > 0).then_some(seconds);
+        }
+        if let Some(limit) = self.rate_limit_per_minute {
+            service.rate_limit_per_minute = Some(limit);
         }
         if self.memory.is_none() && self.cpu_cores.is_none() {
             return Ok(());
@@ -556,6 +677,11 @@ impl AppOverrides {
             memory: limits.and_then(|l| l.memory).map(|q| format!("{}Mi", q.0)),
             cpu_cores: limits.and_then(|l| l.cpu_cores),
             cooldown_seconds: Some(service.placement.cooldown_seconds.unwrap_or(0)),
+            rate_limit_per_minute: Some(
+                service
+                    .rate_limit_per_minute
+                    .unwrap_or_else(crate::routing::ratelimit::default_per_minute),
+            ),
         }
     }
 }

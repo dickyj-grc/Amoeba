@@ -8,6 +8,9 @@ app:
 placement:
   port: 3000
   cooldown_seconds: 180
+# It browses the web, so it needs outbound access.
+sandbox:
+  egress: true
 permissions:
   # MCP's Streamable HTTP transport uses POST for every call (initialize,
   # tools/list, tools/call, ...), which Amoeba classifies as the "add"

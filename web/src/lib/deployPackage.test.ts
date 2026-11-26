@@ -89,6 +89,10 @@ describe('deploy package', () => {
     expect(manifest.local_upstream).toBeUndefined();
     const local = buildManifest({ ...input, localUpstream: true }, { env: {}, secrets: {} }) as any;
     expect(local.local_upstream).toBe(true);
+    // No outbound network unless asked for: the gateway's sandbox default.
+    expect(manifest.sandbox).toBeUndefined();
+    const online = buildManifest({ ...input, allowInternet: true }, { env: {}, secrets: {} }) as any;
+    expect(online.sandbox).toEqual({ egress: true });
   });
 
   it('writes a multi-entry zip with correct offsets', () => {
