@@ -11,6 +11,11 @@ placement:
 # Each table and query gets its own operation name, so permissions can grant
 # them separately. First match wins; anything unmatched is denied because no
 # role is granted the fallback read/add/update/delete operations.
+# It connects to PostgreSQL wherever DATABASE_URL points, so it needs outbound
+# access. If PostgreSQL runs in a container, list that container's Docker
+# network under `sandbox.networks` instead of opening egress.
+sandbox:
+  egress: true
 operation_rules:
   - operation: customers.read
     match_type: path

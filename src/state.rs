@@ -34,6 +34,13 @@ pub struct AppState {
     /// The latest source build per app name, for progress and cancel.
     pub builds: std::sync::Mutex<HashMap<String, Arc<BuildProgress>>>,
     pub http_client: reqwest::Client,
+    /// Rate limits for sign-ins and per-caller requests.
+    pub limits: crate::routing::ratelimit::Limits,
+    /// Authorization servers named in each service's OAuth Protected
+    /// Resource Metadata; set once at startup.
+    pub authorization_servers: std::sync::OnceLock<Vec<String>>,
+    /// When each pinned MCP app's tool list was last read.
+    tool_checks: std::sync::Mutex<HashMap<String, std::time::Instant>>,
     pub users_file: String,
     pub catalog_path: String,
     config_dir: PathBuf,
@@ -101,6 +108,9 @@ impl AppState {
             issued_tokens: IssuedTokenStore::persistent(config_dir.join("issued_tokens.json")),
             builds: std::sync::Mutex::new(HashMap::new()),
             http_client,
+            limits: Default::default(),
+            authorization_servers: Default::default(),
+            tool_checks: Default::default(),
             users_file: users_file.to_string(),
             catalog_path: config_path.to_string(),
             config_dir,
@@ -167,6 +177,29 @@ impl AppState {
 }
 
 impl AppState {
+    /// Whether `name`'s tool list was read within `within`.
+    pub fn tool_check_is_recent(&self, name: &str, within: Duration) -> bool {
+        self.tool_checks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .is_some_and(|t| t.elapsed() < within)
+    }
+
+    pub fn record_tool_check(&self, name: &str, at: std::time::Instant) {
+        self.tool_checks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), at);
+    }
+
+    pub fn forget_tool_check(&self, name: &str) {
+        self.tool_checks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+    }
+
     /// Read the lifecycle state for a service, if one exists.
     pub fn app_state(&self, name: &str) -> Option<Arc<AppLifecycleState>> {
         self.app_states.load().get(name).cloned()

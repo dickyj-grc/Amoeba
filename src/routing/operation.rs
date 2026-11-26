@@ -332,6 +332,9 @@ mod tests {
             local_upstream: false,
             interface: None,
             calls: Vec::new(),
+            sandbox: None,
+            rate_limit_per_minute: None,
+            tools: None,
             source: None,
             overrides: None,
         }

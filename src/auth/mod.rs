@@ -1,6 +1,7 @@
 //! Unified JWT verification: local HMAC mode and remote JWKS mode.
 
 pub mod delegation;
+pub mod identity;
 pub mod issued;
 pub mod jwks;
 pub mod jwt;

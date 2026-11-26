@@ -22,6 +22,9 @@ pub struct ComposeDriver {
     /// before every `ensure_started`. `None` for a pre-existing file
     /// (Scenario 2), which Amoeba never touches.
     inline: Option<StackSpec>,
+    /// The app's own network and whether the app has egress, when the app is
+    /// sandboxed and its compose file was pointed at it at install.
+    app_network: Option<(String, bool)>,
 }
 
 impl ComposeDriver {
@@ -37,6 +40,7 @@ impl ComposeDriver {
             primary_service: primary_service.to_string(),
             env_from_secret,
             inline: None,
+            app_network: None,
         }
     }
 
@@ -53,13 +57,82 @@ impl ComposeDriver {
             primary_service: primary_service.to_string(),
             env_from_secret,
             inline: Some(stack),
+            app_network: None,
         }
+    }
+
+    /// Runs the stack on `network`, internal and shared only with the
+    /// gateway; with `egress`, its services also join the egress network.
+    pub fn with_app_network(mut self, network: String, egress: bool) -> Self {
+        self.app_network = Some((network, egress));
+        self
+    }
+
+    /// Creates the app's network and attaches the gateway to it.
+    async fn prepare_network(&self) -> Result<(), DriverError> {
+        let Some((network, egress)) = &self.app_network else {
+            return Ok(());
+        };
+        let internal = &true;
+        if *egress {
+            let found =
+                Self::docker(&["network", "inspect", super::sandbox::EGRESS_NETWORK]).await?;
+            if !found.status.success() {
+                let option = format!(
+                    "{}={}",
+                    super::sandbox::NO_ICC_OPTION.0,
+                    super::sandbox::NO_ICC_OPTION.1
+                );
+                // Fails harmlessly when another app created it first.
+                let _ = Self::docker(&[
+                    "network",
+                    "create",
+                    "-o",
+                    &option,
+                    super::sandbox::EGRESS_NETWORK,
+                ])
+                .await;
+            }
+        }
+        let inspect = Self::docker(&["network", "inspect", "-f", "{{.Internal}}", network]).await?;
+        let found = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+        if !inspect.status.success() || found != internal.to_string() {
+            if inspect.status.success() {
+                // Egress changed: the internal flag cannot change in place.
+                let _ = self.run(&["down"]).await;
+                let _ = Self::docker(&["network", "rm", network]).await;
+            }
+            let label = format!("amoeba.app={}", self.project_name);
+            let mut args = vec!["network", "create", "--label", &label];
+            if *internal {
+                args.push("--internal");
+            }
+            args.push(network);
+            let create = Self::docker(&args).await?;
+            Self::check_success("docker network create", &create)?;
+        }
+        if let Some(gateway) = super::sandbox::gateway_container() {
+            // Fails harmlessly when the gateway is already attached.
+            let _ = Self::docker(&["network", "connect", network, &gateway]).await;
+        }
+        Ok(())
+    }
+
+    async fn docker(args: &[&str]) -> Result<std::process::Output, DriverError> {
+        Ok(Command::new("docker")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?)
     }
 
     pub async fn ensure_started(&self) -> Result<(), DriverError> {
         if let Some(stack) = &self.inline {
             self.regenerate(stack)?;
         }
+        self.prepare_network().await?;
 
         let output = if self.service_exists().await? {
             self.run(&["start"]).await?
@@ -137,6 +210,7 @@ impl ComposeDriver {
         }
 
         cmd.args(args)
+            .envs(super::sandbox::identity_env(&self.project_name))
             .envs(secret_env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

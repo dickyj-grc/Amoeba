@@ -7,6 +7,7 @@ import {
   LoginResponse,
   ServiceItem,
   ServiceTokenResponse,
+  ToolsStatus,
 } from '../types/amoeba';
 import { toServiceItem } from '../lib/services';
 
@@ -153,6 +154,13 @@ class AmoebaApiClient {
         replace: options.replace ?? false,
         ...(options.overrides && Object.keys(options.overrides).length > 0 ? { overrides: options.overrides } : {}),
       }),
+    });
+  }
+
+  /** Approves an MCP app's current tool list, unblocking changed tools. */
+  public async approveTools(name: string): Promise<ToolsStatus> {
+    return this.request<ToolsStatus>(`/admin/apps/${encodeURIComponent(name)}/tools/approve`, {
+      method: 'POST',
     });
   }
 

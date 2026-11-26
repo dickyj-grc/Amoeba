@@ -78,3 +78,9 @@ Tools are `query_<name>` and `<table>_list`, `_get`, `_insert`, `_update`, `_del
 The service is installed as an app package. `examples/app-packages/finance-db` is a working example with demo data in `demo.sql`.
 
 The package declares `DATABASE_URL` as a secret, so only the database service's container receives it, and ships its definitions as the `DB_DEFINITIONS` env default (kept equal to `definitions.json`). Its `operation_rules` name each table and query (see [[gateway#Operation resolution#From an app package]]) and `permissions` grants them, so the gateway refuses a caller before the service is involved.
+
+### Signed identity
+
+With `AMOEBA_IDENTITY_PUBLIC_KEY` and `AMOEBA_SERVICE_NAME` set (Amoeba sets both), the service takes the caller only from a gateway-signed `x-amoeba-identity` and answers 401 without one, ignoring the plain headers.
+
+[[services/amoeba-db/src/lib.rs#Identity#from_request]] verifies it with the gateway's Ed25519 key, `aud` = this service and `iss` = `amoeba`. Without the key it falls back to the plain headers and logs a warning at startup, for setups that keep it reachable only from the gateway.

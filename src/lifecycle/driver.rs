@@ -221,7 +221,7 @@ fn build_one(
         .as_ref()
         .expect("validated at load time: exactly one of container/stack_spec is set");
 
-    ServiceDriver::Compose(match stack.mode() {
+    let driver = match stack.mode() {
         StackMode::ComposeFile { path, project_name } => ComposeDriver::for_compose_file(
             path,
             project_name,
@@ -238,6 +238,17 @@ fn build_one(
                 stack.clone(),
             )
         }
+    };
+    // A sandboxed app's compose file was pointed at its own network at install.
+    let isolated = svc
+        .sandbox
+        .as_ref()
+        .filter(|_| super::sandbox::gateway_container().is_some());
+    ServiceDriver::Compose(match isolated {
+        Some(sandbox) => {
+            driver.with_app_network(super::sandbox::network_name(name), sandbox.egress)
+        }
+        None => driver,
     })
 }
 
@@ -249,6 +260,9 @@ fn build_container_driver(
     docker: Option<Docker>,
     network: &str,
 ) -> ServiceDriver {
+    // Every app can verify the gateway's signed identity header.
+    let mut env = container.env.clone();
+    env.extend(super::sandbox::identity_env(name));
     let memory_limit_mb = container
         .resources
         .as_ref()
@@ -265,9 +279,10 @@ fn build_container_driver(
             container.image.clone(),
             memory_limit_mb,
             cpu_cores,
-            container.env.clone(),
+            env,
             svc.env_from_secret.clone(),
             container.command.clone(),
+            svc.sandbox.clone(),
         ));
     }
 
@@ -278,9 +293,10 @@ fn build_container_driver(
         network.to_string(),
         memory_limit_mb,
         container.runtime.clone(),
-        container.env.clone(),
+        env,
         svc.env_from_secret.clone(),
         container.command.clone(),
+        svc.sandbox.clone(),
     ))
 }
 

@@ -18,6 +18,8 @@ export interface DeployInput {
   isPublic: boolean;
   /** Call the app as a local client: no Origin, Host localhost (e.g. MCP servers). */
   localUpstream?: boolean;
+  /** Let the app open outbound connections; off, it reaches only the gateway. */
+  allowInternet?: boolean;
   envPairs: EnvPair[];
   /** Install over a service that already has this name. */
   replace?: boolean;
@@ -73,6 +75,7 @@ export function buildManifest(input: DeployInput, values: InstallValues): object
     placement: { port: input.port, cooldown_seconds: input.cooldownSeconds },
     public: input.isPublic,
     ...(input.localUpstream ? { local_upstream: true } : {}),
+    ...(input.allowInternet ? { sandbox: { egress: true } } : {}),
     schema: { env, secrets },
   };
 }

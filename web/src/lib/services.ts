@@ -29,5 +29,6 @@ export function toServiceItem(status: AppStatusResponse): ServiceItem {
     ...(status.interface ? { interface: status.interface } : {}),
     ...(status.source ? { source: status.source } : {}),
     ...(status.settings ? { settings: status.settings } : {}),
+    ...(status.tools ? { tools: status.tools } : {}),
   };
 }

@@ -19,7 +19,10 @@ pub async fn handle(
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
-    let who = Identity::from_headers(&headers);
+    let who = match Identity::from_request(&svc, &headers) {
+        Ok(who) => who,
+        Err(e) => return e.into_response(),
+    };
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or(Value::Null);

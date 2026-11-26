@@ -3,12 +3,17 @@
 
 use crate::auth::Claims;
 use crate::auth::users::UserStore;
+use crate::routing::ratelimit::{
+    LOGIN_FAILURES_PER_ACCOUNT, LOGIN_FAILURES_PER_ADDRESS, client_address,
+};
 use crate::state::AppState;
 use axum::{
-    extract::{Json, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Json, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::error;
@@ -29,12 +34,32 @@ pub struct LoginResponse {
 }
 
 /// Exchanges a username/password for a short-lived JWT.
-/// Returns a generic 401 on any failure to avoid user enumeration.
+/// Returns a generic 401 on any failure to avoid user enumeration, and 429
+/// with `Retry-After` after too many recent failures for the account or the
+/// client address ([`crate::routing::ratelimit`]).
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
-    let result = async {
+) -> Response {
+    let account_key = format!("user:{}", payload.username);
+    let address_key = client_address(peer.map(|p| p.0.ip()), &headers).map(|a| format!("ip:{a}"));
+    let mut keys = vec![(account_key.as_str(), LOGIN_FAILURES_PER_ACCOUNT)];
+    if let Some(address) = &address_key {
+        keys.push((address.as_str(), LOGIN_FAILURES_PER_ADDRESS));
+    }
+    if let Err(retry_after) = state.limits.login_blocked(&keys) {
+        tracing::warn!(user = %payload.username, address = ?address_key, "sign-in blocked after repeated failures");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after.to_string())],
+            "too many failed sign-ins; try again later",
+        )
+            .into_response();
+    }
+
+    let result: Result<Json<LoginResponse>, StatusCode> = async {
         let store = UserStore::load(&state.users_file).map_err(|e| {
             error!("failed to load users file: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -70,11 +95,21 @@ pub async fn login(
     }
     .await;
 
-    if result.is_err() {
-        tokio::time::sleep(LOGIN_FAILURE_DELAY).await;
+    match result {
+        Ok(response) => {
+            state.limits.clear_login_failures(&account_key);
+            response.into_response()
+        }
+        Err(status) => {
+            if status == StatusCode::UNAUTHORIZED {
+                let mut failed = vec![account_key.as_str()];
+                failed.extend(address_key.as_deref());
+                state.limits.record_login_failure(&failed);
+            }
+            tokio::time::sleep(LOGIN_FAILURE_DELAY).await;
+            status.into_response()
+        }
     }
-
-    result
 }
 
 /// Revokes the JWT presented in the request. Requires a valid token with the

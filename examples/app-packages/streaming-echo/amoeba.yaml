@@ -8,6 +8,9 @@ app:
 placement:
   port: 8080
   cooldown_seconds: 30
+# It installs Flask from PyPI when it starts, so it needs outbound access.
+sandbox:
+  egress: true
 permissions:
   read: [admin, analyst]
 schema:

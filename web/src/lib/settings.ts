@@ -9,6 +9,8 @@ export interface SettingsDraft {
   cpu: string;
   /** Seconds; "0" keeps the app running. */
   cooldown: string;
+  /** Requests per caller per minute; "0" is unlimited, "" the gateway default. */
+  rateLimit: string;
 }
 
 const OPERATIONS = ['read', 'add', 'update', 'delete'];
@@ -25,6 +27,7 @@ export function toDraft(settings: AppSettings): SettingsDraft {
     memory: settings.memory ?? '',
     cpu: settings.cpu_cores ? String(settings.cpu_cores) : '',
     cooldown: String(settings.cooldown_seconds ?? 0),
+    rateLimit: settings.rate_limit_per_minute === undefined ? '' : String(settings.rate_limit_per_minute),
   };
 }
 
@@ -61,6 +64,11 @@ export function changedSettings(base: AppSettings, draft: SettingsDraft): AppSet
   const cooldown = Number(draft.cooldown || '0');
   if (!Number.isInteger(cooldown) || cooldown < 0) throw new Error('Idle shutdown must be whole seconds.');
   if (cooldown !== (base.cooldown_seconds ?? 0)) changed.cooldown_seconds = cooldown;
+  if (draft.rateLimit.trim() !== '') {
+    const limit = Number(draft.rateLimit);
+    if (!Number.isInteger(limit) || limit < 0) throw new Error('Requests per minute must be a whole number.');
+    if (limit !== base.rate_limit_per_minute) changed.rate_limit_per_minute = limit;
+  }
   return changed;
 }
 

@@ -68,6 +68,11 @@ pub struct AuthSettings {
     /// process restarts instead of reviving revoked tokens.
     #[serde(default = "default_revocation_file")]
     pub revocation_file: String,
+    /// OAuth authorization servers that issue tokens for Amoeba's services,
+    /// listed in their Protected Resource Metadata for MCP clients. Defaults
+    /// to `issuer` in JWKS mode.
+    #[serde(default)]
+    pub authorization_servers: Vec<String>,
 }
 
 impl Default for AuthSettings {
@@ -80,6 +85,7 @@ impl Default for AuthSettings {
             jwt_secret: None,
             users_file: default_users_file(),
             revocation_file: default_revocation_file(),
+            authorization_servers: Vec::new(),
         }
     }
 }
@@ -311,6 +317,7 @@ mod tests {
             jwt_secret: Some("literal-secret".into()),
             users_file: DEFAULT_USERS_FILE.into(),
             revocation_file: DEFAULT_REVOCATION_FILE.into(),
+            authorization_servers: Vec::new(),
         };
         assert_eq!(auth.resolve_jwt_secret().unwrap(), b"literal-secret");
 

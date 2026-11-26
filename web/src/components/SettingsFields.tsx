@@ -79,7 +79,18 @@ export const SettingsFields: React.FC<{
         />
       </label>
     </div>
-    <p className="text-[10px] text-muted-foreground">Idle stop 0 keeps the app running.</p>
+    <label className="block">
+      <span className="block font-medium text-foreground mb-1">Requests per minute, per caller</span>
+      <input
+        type="number"
+        min={0}
+        value={draft.rateLimit}
+        placeholder="gateway default (600)"
+        onChange={(e) => onChange({ ...draft, rateLimit: e.target.value })}
+        className={inputClass}
+      />
+    </label>
+    <p className="text-[10px] text-muted-foreground">Idle stop 0 keeps the app running. Requests per minute 0 is unlimited.</p>
   </div>
 );
 

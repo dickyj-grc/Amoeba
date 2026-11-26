@@ -298,6 +298,10 @@ fn tool_definitions() -> Vec<ToolDef> {
                         "type": "integer",
                         "description": "CPU core limit."
                     },
+                    "allow_internet": {
+                        "type": "boolean",
+                        "description": "Let the app open outbound connections (the internet, an outside database). Off by default: the app reaches only the gateway."
+                    },
                     "calls": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -537,7 +541,7 @@ Set `public: true` to skip authentication entirely. The service is open to anyon
         "secrets" => "\
 # Amoeba Secrets
 
-Secrets are stored encrypted on disk and injected into containers at startup.
+Secrets are stored as plain files on the Amoeba host, readable only by Amoeba (mode 0600), and injected into containers at startup. They are not encrypted at rest; protect the host and its disk accordingly.
 
 ## How to use
 1. Pass secrets in the `secrets` field of `deploy_service`.
@@ -633,6 +637,14 @@ http://<gateway>/v1/<service_name>/<path>
 4. `get_runtime_logs` — debug any runtime issues.
 5. `update_policy` — set who can access it.
 6. `delete_service` — remove when no longer needed.
+
+## The sandbox your app runs in
+Apps you deploy are confined by default, so write them for it:
+- The root filesystem is read-only. Write to `/tmp` (or `/run`, `/var/tmp`) only.
+- An image that runs as root runs as user 65534 instead. Don't rely on root, and listen on a port of 1024 or above.
+- No outbound network: the app reaches only the gateway. Pass `allow_internet: true` to `deploy_service` when it must call the internet or an outside database.
+- To call another Amoeba service as the person who called yours, list it in `calls` and send the `x-amoeba-caller-token` header as `Authorization: Bearer <token>` to `http://<gateway>/v1/<service>/`.
+- Requests carry `x-amoeba-identity`, a token signed by the gateway with the caller's user, org and roles; verify it with the public key in `AMOEBA_IDENTITY_PUBLIC_KEY` instead of trusting the plain `x-amoeba-*` headers.
 
 ## The 'one-shot' loop
 If deployment fails, the model can read the error via `get_build_logs` or `get_runtime_logs`, fix the code, and deploy again — all in one conversation. This is the core value prop of AI + Amoeba.",
@@ -932,6 +944,7 @@ async fn install_app_on_amoeba(
     cpu_cores: Option<u64>,
     replace: bool,
     calls: &[String],
+    allow_internet: bool,
 ) -> Result<(u16, String), String> {
     let manifest = AppManifest {
         api_version: "v1".into(),
@@ -958,6 +971,11 @@ async fn install_app_on_amoeba(
         local_upstream: false,
         interface: None,
         calls: calls.to_vec(),
+        rate_limit_per_minute: None,
+        sandbox: Some(amoeba::config::schema::Sandbox {
+            egress: allow_internet,
+            ..Default::default()
+        }),
         resources: if memory.is_some() || cpu_cores.is_some() {
             Some(amoeba::apps::schema::ResourceSpec {
                 memory: memory.map(|m| m.to_string()),
@@ -1267,6 +1285,7 @@ async fn handle_tool_call(
             let memory = args["memory"].as_str().map(|s| s.to_string());
             let cpu_cores = args["cpu_cores"].as_u64();
             let replace = args["replace"].as_bool().unwrap_or(false);
+            let allow_internet = args["allow_internet"].as_bool().unwrap_or(false);
             let calls: Vec<String> = args["calls"]
                 .as_array()
                 .map(|a| {
@@ -1373,6 +1392,7 @@ async fn handle_tool_call(
                 cpu_cores,
                 replace,
                 &calls,
+                allow_internet,
             )
             .await?;
 

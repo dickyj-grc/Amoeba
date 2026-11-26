@@ -18,6 +18,8 @@ services:
       # First run: generate a signing secret, an admin user and an empty
       # catalog in /etc/amoeba. Existing state is never changed.
       - AMOEBA_BOOTSTRAP=1
+      # Each app gets a network shared only with this container, which joins it.
+      - AMOEBA_SELF_CONTAINER=amoeba
       - RUST_LOG=info
     ports:
       - "8080:8080"

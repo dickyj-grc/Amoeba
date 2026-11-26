@@ -5,4 +5,6 @@ pub mod apps_admin;
 pub mod auth;
 pub mod operation;
 pub mod proxy;
+pub mod ratelimit;
+pub mod resource_metadata;
 pub mod websocket;

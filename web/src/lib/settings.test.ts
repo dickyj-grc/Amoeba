@@ -25,6 +25,15 @@ describe('settings form', () => {
     });
   });
 
+  it('sends a per-caller request limit only when set', () => {
+    const draft = toDraft(base);
+    expect(draft.rateLimit).toBe('');
+    draft.rateLimit = '30';
+    expect(changedSettings(base, draft)).toEqual({ rate_limit_per_minute: 30 });
+    draft.rateLimit = '-1';
+    expect(() => changedSettings(base, draft)).toThrow(/whole number/);
+  });
+
   it('rejects numbers the gateway would refuse', () => {
     const draft = toDraft(base);
     draft.cooldown = '1.5';

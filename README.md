@@ -183,7 +183,15 @@ Adding a containerized app usually means DNS records, reverse-proxy rules, TLS c
 - Adding or removing an app is a single entry in `services.json`; Amoeba hot-reloads it without a restart.
 - The web console and the MCP server can build an image from a Git repo or a Dockerfile and deploy it in one step.
 
-### 7. Minimal, Self-Hosted, and Portable
+### 7. Safe Defaults for AI-Built Apps
+An app an AI just wrote runs confined, so a security team can approve one-shot deploys.
+
+- **The gateway is the only way in.** Each app has a network shared only with the gateway, and requests carry a signed caller identity (`x-amoeba-identity`) apps can verify, so one app cannot reach another directly or pose as a different caller.
+- **A sandbox by default:** read-only root filesystem, no Linux capabilities, no root user, no outbound network, and limits on processes and memory. Each relaxes per app in its manifest ([`sandbox`](docs/manifest.md#sandbox)).
+- **MCP tools under control:** permissions per tool ("analysts may search invoices, only admins delete them"), and a tool whose description changes after approval is blocked until an admin approves it again.
+- **Rate limits** on failed sign-ins and on each caller's requests to each service.
+
+### 8. Minimal, Self-Hosted, and Portable
 Amoeba is designed for environments where you want control without operational overhead, including ones where data may not leave your own servers.
 
 - The release image is a small static binary; no Kubernetes or managed control plane is required.
@@ -200,6 +208,10 @@ Amoeba is designed for environments where you want control without operational o
 | Operation rules by HTTP method and by path | Shipped |
 | Verified identity headers (`x-amoeba-user`, `x-amoeba-org`, `x-amoeba-roles`) | Shipped |
 | Upstream credential injection, fail-closed | Shipped |
+| Gateway-only access: a network per app, a signed caller identity (`x-amoeba-identity`) apps can verify | Shipped |
+| Sandbox for AI-built apps: read-only root, no capabilities, non-root, no egress, process and memory limits | Shipped |
+| MCP: per-tool permissions, pinned tool lists, OAuth Protected Resource Metadata | Shipped |
+| Rate limits on sign-ins and per caller per service | Shipped |
 | Scale-to-zero for single containers and compose stacks, capacity budgets | Shipped |
 | Streaming responses (SSE, Streamable HTTP for MCP) | Shipped |
 | WebSockets, e.g. Playwright or Puppeteer driving a hosted browser over CDP | Shipped |

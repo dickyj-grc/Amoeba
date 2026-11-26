@@ -1,8 +1,12 @@
 //! Amoeba database service: one reviewed service holds the database
 //! connection, and callers can only use approved definitions (tables opened
 //! for specific operations, and named queries). It runs behind the Amoeba
-//! gateway, which authenticates callers and sends their identity as
-//! `x-amoeba-user`, `x-amoeba-org` and `x-amoeba-roles`.
+//! gateway, which authenticates callers and sends their identity signed, as
+//! `x-amoeba-identity`. With the gateway's public key in
+//! `AMOEBA_IDENTITY_PUBLIC_KEY` (Amoeba sets it), that token is required and
+//! the plain `x-amoeba-user`, `x-amoeba-org` and `x-amoeba-roles` headers are
+//! ignored, so a caller that reaches the service without the gateway cannot
+//! claim any roles.
 
 pub mod db;
 pub mod defs;
@@ -23,9 +27,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// The caller, as the gateway verified it. A request that did not come
-/// through the gateway has no roles and can use nothing that is not `"*"`;
-/// the deployment must keep this service reachable only from the gateway.
+/// The caller, as the gateway verified it.
 #[derive(Debug, Clone, Default)]
 pub struct Identity {
     pub user: String,
@@ -33,7 +35,83 @@ pub struct Identity {
     pub roles: Vec<String>,
 }
 
+/// The gateway's Ed25519 public key and this service's name, the `aud` its
+/// identity tokens carry.
+#[derive(Clone)]
+pub struct IdentityKey {
+    public_key: Vec<u8>,
+    service: String,
+}
+
+impl IdentityKey {
+    /// From `AMOEBA_IDENTITY_PUBLIC_KEY` (base64url, no padding) and
+    /// `AMOEBA_SERVICE_NAME`, as Amoeba sets them.
+    pub fn new(public_key: &str, service: &str) -> Result<Self, String> {
+        use base64::Engine;
+        let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(public_key.trim())
+            .map_err(|e| format!("AMOEBA_IDENTITY_PUBLIC_KEY is not base64url: {e}"))?;
+        if public_key.len() != 32 {
+            return Err("AMOEBA_IDENTITY_PUBLIC_KEY is not an Ed25519 public key".into());
+        }
+        Ok(Self {
+            public_key,
+            service: service.to_string(),
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct IdentityClaims {
+    sub: String,
+    #[serde(default)]
+    org_id: Option<String>,
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
 impl Identity {
+    /// The caller of a request: from the signed `x-amoeba-identity` token
+    /// when the service has the gateway's key, else (older setups) from the
+    /// plain headers. A missing or invalid token is a 401.
+    pub fn from_request(svc: &Service, headers: &HeaderMap) -> Result<Self, ApiError> {
+        let Some(key) = &svc.identity_key else {
+            return Ok(Self::from_headers(headers));
+        };
+        let unauthenticated = |message: &str| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+                message.to_string(),
+            )
+        };
+        let token = headers
+            .get("x-amoeba-identity")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                unauthenticated(
+                    "missing x-amoeba-identity: call this service through the Amoeba gateway",
+                )
+            })?;
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_audience(&[&key.service]);
+        validation.set_issuer(&["amoeba"]);
+        let claims = jsonwebtoken::decode::<IdentityClaims>(
+            token,
+            &jsonwebtoken::DecodingKey::from_ed_der(&key.public_key),
+            &validation,
+        )
+        .map_err(|_| unauthenticated("invalid x-amoeba-identity"))?
+        .claims;
+        Ok(Identity {
+            user: claims.sub,
+            org: claims.org_id,
+            roles: claims.roles,
+        })
+    }
+
+    /// The caller from the plain gateway headers. Trust only when nothing
+    /// but the gateway can reach the service.
     pub fn from_headers(headers: &HeaderMap) -> Self {
         let get = |name: &str| {
             headers
@@ -96,13 +174,24 @@ impl Loaded {
 pub struct Service {
     pub db: Db,
     loaded: RwLock<Arc<Loaded>>,
+    /// Set: callers must present a gateway-signed identity token.
+    identity_key: Option<IdentityKey>,
 }
 
 impl Service {
     pub fn new(db: Db, defs: Definitions) -> Arc<Self> {
+        Self::with_identity_key(db, defs, None)
+    }
+
+    pub fn with_identity_key(
+        db: Db,
+        defs: Definitions,
+        identity_key: Option<IdentityKey>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             db,
             loaded: RwLock::new(Arc::new(Loaded::new(defs))),
+            identity_key,
         })
     }
 
@@ -156,7 +245,10 @@ async fn respond(
     call: Call,
     status: StatusCode,
 ) -> impl IntoResponse {
-    let who = Identity::from_headers(headers);
+    let who = match Identity::from_request(svc, headers) {
+        Ok(who) => who,
+        Err(e) => return e.into_response(),
+    };
     match ops::execute(svc, &who, call).await {
         Ok(body) => (status, axum::Json(body)).into_response(),
         Err(e) => e.into_response(),

@@ -66,6 +66,15 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,
 
+    /// Requests each caller may make per minute; `0` is unlimited. Unset
+    /// uses the gateway's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<u32>,
+
+    /// How the app's containers are confined. Defaults apply when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<crate::config::schema::Sandbox>,
+
     /// Optional resource limits for capacity gating.
     #[serde(default)]
     pub resources: Option<ResourceSpec>,

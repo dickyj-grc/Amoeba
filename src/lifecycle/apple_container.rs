@@ -14,6 +14,8 @@
 //! caches it in `ServiceRuntimeState` for reuse by warm requests.
 
 use super::driver::{DriverError, SPEC_LABEL, resolve_env_from_secret, spec_fingerprint};
+use super::sandbox::{self, DEFAULT_MEMORY_MB, SCRATCH_PATHS};
+use crate::config::schema::Sandbox;
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -29,6 +31,8 @@ pub struct AppleContainerDriver {
     env_from_secret: HashMap<String, String>,
     /// Replaces the image's `CMD` when non-empty.
     command: Vec<String>,
+    /// Confinement and a network of its own; `None` runs it as before.
+    sandbox: Option<Sandbox>,
 }
 
 impl AppleContainerDriver {
@@ -40,6 +44,7 @@ impl AppleContainerDriver {
         env: HashMap<String, String>,
         env_from_secret: HashMap<String, String>,
         command: Vec<String>,
+        sandbox: Option<Sandbox>,
     ) -> Self {
         Self {
             container_name,
@@ -49,6 +54,7 @@ impl AppleContainerDriver {
             env,
             env_from_secret,
             command,
+            sandbox,
         }
     }
 
@@ -57,7 +63,11 @@ impl AppleContainerDriver {
     /// since it's cheap (one more `inspect`) and keeps this function's
     /// contract simple: "the returned string is always current."
     pub async fn ensure_started(&self) -> Result<String, DriverError> {
-        let args = self.run_args(&self.resolved_env()?);
+        let user = match &self.sandbox {
+            Some(sandbox) => sandbox::run_as_user(&self.image, true, sandbox.run_as_root).await,
+            None => None,
+        };
+        let args = self.run_args(&self.resolved_env()?, user.as_deref());
         let inspect = self.run(&["inspect", &self.container_name]).await?;
 
         if inspect.status.success() {
@@ -70,6 +80,7 @@ impl AppleContainerDriver {
                     .run(&["delete", "--force", &self.container_name])
                     .await?;
                 Self::check_success("container delete", &delete)?;
+                self.prepare_network().await?;
                 self.create_and_start(&args).await?;
             } else if found.state != "running" {
                 let start = self.run(&["start", &self.container_name]).await?;
@@ -78,6 +89,7 @@ impl AppleContainerDriver {
                 return Ok(ip);
             }
         } else {
+            self.prepare_network().await?;
             self.create_and_start(&args).await?;
         }
 
@@ -107,16 +119,75 @@ impl AppleContainerDriver {
     /// Arguments for `container run`: the image, then `command` (which, as in
     /// `docker run`, replaces the image's `CMD`). Labelled with a fingerprint
     /// of the other arguments, so a changed spec is detected later.
-    fn run_args(&self, env: &HashMap<String, String>) -> Vec<String> {
+    /// Creates the app's own network when sandboxed: host-only unless egress
+    /// is allowed, so the app reaches the gateway on this Mac and nothing else.
+    async fn prepare_network(&self) -> Result<(), DriverError> {
+        let Some(sandbox) = &self.sandbox else {
+            return Ok(());
+        };
+        let name = sandbox::network_name(&self.container_name);
+        let mode = if sandbox.egress { "nat" } else { "hostOnly" };
+        let inspect = self.run(&["network", "inspect", &name]).await?;
+        if inspect.status.success() {
+            let found: serde_json::Value =
+                serde_json::from_slice(&inspect.stdout).unwrap_or_default();
+            if found[0]["configuration"]["mode"].as_str() == Some(mode) {
+                return Ok(());
+            }
+            // Egress changed: a network's mode cannot be changed in place.
+            let delete = self.run(&["network", "delete", &name]).await?;
+            Self::check_success("container network delete", &delete)?;
+        }
+        let label = format!("amoeba.app={}", self.container_name);
+        let mut args = vec!["network", "create", "--label", &label];
+        if !sandbox.egress {
+            args.push("--internal");
+        }
+        args.push(&name);
+        let create = self.run(&args).await?;
+        Self::check_success("container network create", &create)
+    }
+
+    fn run_args(&self, env: &HashMap<String, String>, user: Option<&str>) -> Vec<String> {
         let mut args: Vec<String> = vec![
             "run".into(),
             "-d".into(),
             "--name".into(),
             self.container_name.clone(),
         ];
-        if let Some(mb) = self.memory_limit_mb {
+        let memory = self
+            .memory_limit_mb
+            .or(self.sandbox.as_ref().map(|_| DEFAULT_MEMORY_MB));
+        if let Some(mb) = memory {
             args.push("-m".into());
             args.push(format!("{mb}M"));
+        }
+        if let Some(sandbox) = &self.sandbox {
+            args.push("--network".into());
+            args.push(sandbox::network_name(&self.container_name));
+            for network in &sandbox.networks {
+                args.push("--network".into());
+                args.push(network.clone());
+            }
+            args.push("--cap-drop".into());
+            args.push("ALL".into());
+            for cap in &sandbox.capabilities {
+                args.push("--cap-add".into());
+                args.push(format!("CAP_{}", cap.trim_start_matches("CAP_")));
+            }
+            args.push("--ulimit".into());
+            args.push(format!("nproc={}", sandbox.pids_limit));
+            if sandbox.read_only_root {
+                args.push("--read-only".into());
+                for path in SCRATCH_PATHS {
+                    args.push("--tmpfs".into());
+                    args.push(path.into());
+                }
+            }
+            if let Some(user) = user {
+                args.push("--user".into());
+                args.push(user.into());
+            }
         }
         if let Some(cpus) = self.cpu_cores {
             args.push("-c".into());
@@ -257,8 +328,9 @@ mod tests {
                 "--port".into(),
                 "8080".into(),
             ],
+            None,
         );
-        let args = driver.run_args(&HashMap::new());
+        let args = driver.run_args(&HashMap::new(), None);
         let image_at = args
             .iter()
             .position(|a| a == "lightpanda/browser:latest")
@@ -267,6 +339,36 @@ mod tests {
             args[image_at + 1..],
             ["/bin/lightpanda", "mcp", "--port", "8080"]
         );
+    }
+
+    #[test]
+    fn a_sandboxed_container_gets_its_own_network_and_limits() {
+        let driver = AppleContainerDriver::new(
+            "scraper".into(),
+            "img".into(),
+            None,
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            Some(Sandbox {
+                capabilities: vec!["NET_BIND_SERVICE".into()],
+                ..Default::default()
+            }),
+        );
+        let args = driver.run_args(&HashMap::new(), Some(sandbox::NON_ROOT_USER));
+        let has = |pair: [&str; 2]| args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]);
+        assert!(has(["--network", "amoeba-app-scraper"]));
+        assert!(has(["--cap-drop", "ALL"]));
+        assert!(has(["--cap-add", "CAP_NET_BIND_SERVICE"]));
+        assert!(has(["--ulimit", "nproc=256"]));
+        assert!(has(["--tmpfs", "/tmp"]));
+        assert!(has(["--user", sandbox::NON_ROOT_USER]));
+        assert!(has(["-m", "1024M"]));
+        assert!(args.contains(&"--read-only".to_string()));
+        // Options come before the image.
+        let image_at = args.iter().position(|a| a == "img").unwrap();
+        assert!(args.iter().position(|a| a == "--read-only").unwrap() < image_at);
     }
 
     // @lat: [[deploy#App library#Changed specs recreate the container]]
@@ -283,10 +385,11 @@ mod tests {
                     .collect(),
                 HashMap::new(),
                 command.iter().map(|c| c.to_string()).collect(),
+                None,
             )
         };
         let label = |d: &AppleContainerDriver| {
-            let args = d.run_args(&d.env);
+            let args = d.run_args(&d.env, None);
             assert!(
                 args.windows(2)
                     .any(|w| w[0] == "-l" && w[1].starts_with("amoeba.spec="))
