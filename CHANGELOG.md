@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 — 2026-11-26
 
-### Upgrade notes (security)
+### Upgrade notes
 
 - **New installs are sandboxed.** Apps installed from now on run with a read-only root filesystem (writable `/tmp`, `/run`, `/var/tmp`), no Linux capabilities, no root user (root images run as 65534), at most 256 processes, a 1 GiB memory limit if none is declared, and **no outbound network**. Apps that call the internet, browse, or reach a database elsewhere need `sandbox: { egress: true }` in their manifest, the console's *Allow outbound internet*, or `allow_internet` on amoeba-mcp's `deploy_service`. Bundled apps that need it (Lightpanda, Obscura, finance-db, streaming-echo) already declare it. Services installed before, and hand-written ones, are unchanged until reinstalled.
 - **Each app gets its own Docker network**, internal and shared only with the gateway, so apps can no longer reach each other directly. Apps with egress also join `amoeba-egress`, where they cannot reach each other either. An app that relied on calling another app by container name must go through the gateway (see `calls`), or list the network under `sandbox.networks`. Set `AMOEBA_SELF_CONTAINER` to the gateway's container name if you run it outside the provided compose files.
@@ -10,6 +10,7 @@
 - **The database service requires a signed identity.** With this release's gateway, amoeba-db trusts only `x-amoeba-identity` and refuses requests without it. Update the gateway and amoeba-db together.
 - **Every app container is recreated once** on its next start, because each now receives `AMOEBA_IDENTITY_PUBLIC_KEY` and `AMOEBA_SERVICE_NAME`.
 - **Rate limits are on by default:** 600 requests a minute per caller per service (`AMOEBA_RATE_LIMIT_PER_MINUTE`, or `rate_limit_per_minute` per app; `0` is unlimited), and sign-ins lock for 15 minutes after 5 failures for an account or 20 from one address.
+- **Installing onto a taken name now fails with 409.** Before, it silently replaced the existing service. Send `replace: true` (in the package `values`, or the library install body) to replace or upgrade it. The MCP server's `deploy_service` tool takes `replace` too.
 
 ### Security
 
@@ -22,10 +23,6 @@
 - **Catalog writes are serialized across requests.** Each admin request used its own lock, so two at once could overwrite each other.
 - **The amoeba-mcp guide no longer says secrets are "stored encrypted on disk".** They are plain files readable only by Amoeba.
 
-### Upgrade notes
-
-- **Installing onto a taken name now fails with 409.** Before, it silently replaced the existing service. Send `replace: true` (in the package `values`, or the library install body) to replace or upgrade it. The MCP server's `deploy_service` tool takes `replace` too.
-
 ### Calls on behalf of the caller
 
 - **`calls: [lightpanda]` in a manifest** (and `calls` on amoeba-mcp's `deploy_service`) lets an app call other services as whoever called it. Each request carries `x-amoeba-caller-token`, which the app sends as `Authorization: Bearer` when calling those services through the gateway. The called service checks the original caller's roles, so a Stagehand or Playwright app and the browser it drives must both grant them.
@@ -35,11 +32,6 @@
 
 - **WebSocket connections pass through the gateway**, with the same token and role checks as any request. Playwright, Puppeteer or Stagehand on a laptop or in CI can drive a browser hosted on Amoeba, which starts on connect and sleeps when idle: `chromium.connectOverCDP("wss://<amoeba>/v1/<browser>/", { headers: { Authorization: "Bearer <token>" } })`. Notebooks, web terminals and live dashboards work behind Amoeba too.
 - An open session counts as an active connection, so the app is never stopped mid-session. `local_upstream` applies, which Chrome and Lightpanda need.
-
-### Fixes
-
-- **amoeba-mcp docs said `deploy_service` secrets are stored encrypted.** They are files on the Amoeba host readable only by Amoeba, outside the catalog; only package secret files travel age-encrypted.
-- **Query strings are forwarded.** The proxy sent apps only the path, so `?status=overdue` filters (including the database service's) and tokens in URLs never arrived.
 
 ### Quick start in one command
 
@@ -62,6 +54,7 @@
 
 ### Fixes
 
+- **Query strings are forwarded.** The proxy sent apps only the path, so `?status=overdue` filters (including the database service's) and tokens in URLs never arrived.
 - **Apps stuck in "installed".** An install's state could be lost to the catalog reload it triggers, so the app showed "installed" forever although it was running. State updates are now atomic.
 - **Nightly e2e: droplet refused (422).** The e2e now tries other DigitalOcean regions when one refuses the droplet, and prints DigitalOcean's reason.
 
